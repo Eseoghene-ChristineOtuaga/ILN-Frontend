@@ -5,6 +5,8 @@ import { DelegationPanel } from '../DelegationPanel';
 
 const mockIsValidStellarAddress = vi.fn();
 const mockGetVotingPower = vi.fn();
+const mockGetDelegationInfo = vi.fn();
+const mockDelegateVotingPower = vi.fn();
 const mockResolveFederatedAddress = vi.fn();
 const mockExecute = vi.fn();
 
@@ -21,6 +23,8 @@ vi.mock('@/utils/governance', () => ({
   },
   isValidStellarAddress: (...args: unknown[]) => mockIsValidStellarAddress(...args),
   getVotingPower: (...args: unknown[]) => mockGetVotingPower(...args),
+  getDelegationInfo: (...args: unknown[]) => mockGetDelegationInfo(...args),
+  delegateVotingPower: (...args: unknown[]) => mockDelegateVotingPower(...args),
 }));
 
 vi.mock('@/utils/federation', () => ({
@@ -31,6 +35,7 @@ vi.mock('@/context/WalletContext', () => ({
   useWallet: () => ({
     address: 'GCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC6',
     isConnected: true,
+    signTx: vi.fn(),
   }),
 }));
 
@@ -44,6 +49,15 @@ vi.mock('@/hooks/useTransaction', () => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockGetDelegationInfo.mockResolvedValue({
+    delegatedTo: null,
+    delegatedAmount: 0,
+    incomingDelegations: 450,
+  });
+  mockGetVotingPower.mockResolvedValue(1700);
+  mockDelegateVotingPower.mockResolvedValue(
+    '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+  );
 });
 
 describe('DelegationPanel', () => {

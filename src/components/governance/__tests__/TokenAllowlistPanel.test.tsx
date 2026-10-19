@@ -40,6 +40,17 @@ vi.mock('@/context/ToastContext', () => ({
 }));
 
 vi.mock('@/utils/governance', () => ({
+  GOVERNANCE_INTEGRATION_STATUS: {
+    castVote: { status: 'Stubbed', label: 'Vote casting' },
+    delegateVotingPower: { status: 'Stubbed', label: 'Vote delegation' },
+    createProposal: { status: 'Stubbed', label: 'Proposal creation' },
+    executeProposal: { status: 'Stubbed', label: 'Proposal execution' },
+    vetoProposal: { status: 'Stubbed', label: 'Proposal veto' },
+    getVotingPower: { status: 'Real', label: 'Voting power lookup' },
+    getGovTokenBalance: { status: 'Stubbed', label: 'Token balance lookup' },
+    getQuorumThreshold: { status: 'Stubbed', label: 'Quorum threshold lookup' },
+    getProposalHistory: { status: 'Stubbed', label: 'Proposal history lookup' },
+  },
   fetchProtocolParameters: (...args: unknown[]) => fetchProtocolParametersMock(...args),
   createProposal: (...args: unknown[]) => createProposalMock(...args),
 }));

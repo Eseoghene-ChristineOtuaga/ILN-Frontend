@@ -60,7 +60,19 @@ export function stubProposalRpc(options: ProposalRpcStubOptions = {}) {
   const simulateTransaction = vi
     .spyOn(rpc.Server.prototype, 'simulateTransaction')
     .mockImplementation(async (tx) => {
-      if (invokedFunction(tx as Transaction) !== 'create_proposal') {
+      const fn = invokedFunction(tx as Transaction);
+      if (fn === 'get_voting_power') {
+        return {
+          transactionData: {},
+          minResourceFee: '100',
+          events: [],
+          latestLedger: 1,
+          id: '1',
+          _parsed: true,
+          result: { auth: [], retval: nativeToScVal(1250n, { type: 'i128' }) },
+        } as unknown as rpc.Api.SimulateTransactionResponse;
+      }
+      if (fn !== 'create_proposal') {
         throw new Error('offline');
       }
       if (options.simulationError) {
