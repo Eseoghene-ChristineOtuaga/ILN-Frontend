@@ -81,9 +81,20 @@ describe('NewGovernanceProposalPage', () => {
       signTx: vi.fn(),
     });
     (useTransaction as unknown as vi.Mock).mockReturnValue({
-      execute: vi.fn().mockResolvedValue('txHash123'),
+      // The page now submits the proposal through `execute` so it is signed by
+      // the connected wallet (#1044, #1045). The mock therefore has to run the
+      // operation it is handed, passing a signTx stub, rather than resolving a
+      // canned value — otherwise createProposal would never be reached.
+      execute: vi.fn(async (operation: unknown) =>
+        typeof operation === 'function'
+          ? await (operation as (signTx: (xdr: string) => Promise<string>) => Promise<unknown>)(
+              async (xdr: string) => `signed-${xdr}`
+            )
+          : 'txHash123'
+      ),
       loading: false,
       error: null,
+      signingModal: null,
     });
     (useBalances as unknown as vi.Mock).mockReturnValue({
       balances: [],

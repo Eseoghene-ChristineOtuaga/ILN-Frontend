@@ -63,7 +63,17 @@ const mockUseWallet = useWallet as unknown as vi.Mock;
 const mockUseTransaction = useTransaction as unknown as vi.Mock;
 const mockUseToast = useToast as unknown as vi.Mock;
 const mockFetchProposal = fetchProposal as unknown as vi.Mock;
-const mockExecute = vi.fn(async (operation: any) => operation(async () => 'signed-xdr'));
+// Mirrors the real `useTransaction.execute`, which catches the operation's
+// failure, reports it through a toast and returns null. Without the catch a
+// rejected governance write (e.g. a typed GovernanceTxError) escapes as an
+// unhandled rejection instead of being handled by the component under test.
+const mockExecute = vi.fn(async (operation: any) => {
+  try {
+    return await operation(async () => 'signed-xdr');
+  } catch {
+    return null;
+  }
+});
 
 const activeProposal = {
   id: 3,

@@ -4,10 +4,13 @@ export type ExpectedTransactionAction =
   | 'approve'
   | 'cancel_invoice'
   | 'cast_vote'
+  | 'create_proposal'
   | 'dispute_invoice'
+  | 'execute_proposal'
   | 'fund_invoice'
   | 'mark_paid'
-  | 'submit_invoice';
+  | 'submit_invoice'
+  | 'veto_proposal';
 
 interface TransactionShape {
   argumentTypeVariants: string[][];
@@ -15,11 +18,32 @@ interface TransactionShape {
 }
 
 const EXPECTED_TRANSACTION_SHAPES: Record<ExpectedTransactionAction, TransactionShape> = {
-  approve: { functionName: 'approve', argumentTypeVariants: [['address', 'address', 'i128', 'u32']] },
+  approve: {
+    functionName: 'approve',
+    argumentTypeVariants: [['address', 'address', 'i128', 'u32']],
+  },
   cancel_invoice: { functionName: 'cancel_invoice', argumentTypeVariants: [['u64']] },
   cast_vote: { functionName: 'cast_vote', argumentTypeVariants: [['address', 'u64', 'u32']] },
+  // Governance mutations (#1044, #1045). Listing them here means the signing
+  // preview validates a governance payload against its expected shape before
+  // the user approves it, the same as the invoice actions.
+  create_proposal: {
+    functionName: 'create_proposal',
+    argumentTypeVariants: [['address', 'u32', 'string', 'string', 'string']],
+  },
+  execute_proposal: {
+    functionName: 'execute_proposal',
+    argumentTypeVariants: [['address', 'u64']],
+  },
+  veto_proposal: {
+    functionName: 'veto_proposal',
+    argumentTypeVariants: [['address', 'u64', 'string']],
+  },
   dispute_invoice: { functionName: 'dispute_invoice', argumentTypeVariants: [['u64', 'string']] },
-  fund_invoice: { functionName: 'fund_invoice', argumentTypeVariants: [['address', 'u64', 'i128']] },
+  fund_invoice: {
+    functionName: 'fund_invoice',
+    argumentTypeVariants: [['address', 'u64', 'i128']],
+  },
   mark_paid: { functionName: 'mark_paid', argumentTypeVariants: [['u64', 'i128']] },
   submit_invoice: {
     functionName: 'submit_invoice',

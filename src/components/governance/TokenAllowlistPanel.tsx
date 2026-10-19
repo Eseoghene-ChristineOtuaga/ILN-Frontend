@@ -7,8 +7,35 @@ import { useWallet } from '@/context/WalletContext';
 import { AcceptedToken, createProposal, fetchProtocolParameters } from '@/utils/governance';
 import { formatAddress } from '@/utils/format';
 import { CONTRACT_ERROR_MAP, parseContractError } from '@/lib/contract/errors';
+import { GovernanceTxError } from '@/lib/governance-tx';
 import FieldTooltip from '@/components/FieldTooltip';
 import GovernanceMockStatusBanner from '@/components/governance/GovernanceMockStatusBanner';
+
+/**
+ * Message for a failed allowlist proposal.
+ *
+ * A `GovernanceTxError` already carries a user-facing remediation (#1044,
+ * #1045) — including the distinction between "we stopped waiting" and
+ * "it failed" — so it is preferred over the generic contract-error map.
+ */
+function proposalFailureMessage(error: unknown): string {
+  if (error instanceof GovernanceTxError) {
+    return error.remediation;
+  }
+  const code = parseContractError(error);
+  if (code) {
+    return CONTRACT_ERROR_MAP[code].message;
+  }
+  return error instanceof Error ? error.message : 'Transaction rejected';
+}
+
+/** A timeout leaves the outcome unknown, so it must not read as a failure. */
+function proposalFailureTitle(error: unknown): string {
+  if (error instanceof GovernanceTxError && error.code === 'TX_TIMEOUT') {
+    return 'Still confirming — outcome unknown';
+  }
+  return 'Proposal failed';
+}
 
 interface TokenRow extends AcceptedToken {
   decimals: number;
@@ -91,15 +118,11 @@ export default function TokenAllowlistPanel() {
       setTokenAddress('');
       setDecimals('6');
     } catch (error) {
-      const code = parseContractError(error);
       updateToast(toastId, {
-        type: 'error',
-        title: 'Proposal failed',
-        message: code
-          ? CONTRACT_ERROR_MAP[code].message
-          : error instanceof Error
-            ? error.message
-            : 'Transaction rejected',
+        type:
+          error instanceof GovernanceTxError && error.code === 'TX_TIMEOUT' ? 'warning' : 'error',
+        title: proposalFailureTitle(error),
+        message: proposalFailureMessage(error),
       });
     } finally {
       setSubmitting(false);
@@ -134,9 +157,10 @@ export default function TokenAllowlistPanel() {
       );
     } catch (error) {
       updateToast(toastId, {
-        type: 'error',
-        title: 'Proposal failed',
-        message: error instanceof Error ? error.message : 'Transaction rejected',
+        type:
+          error instanceof GovernanceTxError && error.code === 'TX_TIMEOUT' ? 'warning' : 'error',
+        title: proposalFailureTitle(error),
+        message: proposalFailureMessage(error),
       });
     } finally {
       setRemoving(null);

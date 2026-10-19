@@ -1,9 +1,23 @@
 /**
  * Contract integration tests for governance functions (castVote, createProposal, etc.)
- * These operate as mocked Soroban calls until the governance contract is deployed.
+ *
+ * Since #1044/#1045 the write paths are real signed Soroban transactions, so
+ * the suite injects a stubbed RPC server rather than relying on a mock
+ * implementation inside the module. The governance contract id is mocked as
+ * configured, because a write against an unconfigured deployment refuses to
+ * run at all — which is itself covered in governance.mutation.test.ts.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { rpc, nativeToScVal } from '@stellar/stellar-sdk';
+
+vi.mock('@/constants', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/constants')>();
+  return {
+    ...actual,
+    GOVERNANCE_CONTRACT_CONFIGURED: true,
+    GOVERNANCE_CONTRACT_ID: 'CD3TE3IAHM737P236XZL2OYU275ZKD6MN7YH7PYYAXYIGEH55OPEWYJC',
+  };
+});
 
 import {
   castVote,
@@ -14,6 +28,7 @@ import {
   fetchProtocolParameters,
   getVotingPower,
   getUserVote,
+  clearGovernanceIdempotencyCache,
   totalVotes,
   votePercent,
   quorumReached,
@@ -32,49 +47,60 @@ import {
   detectMockBacking,
   expectMockBackingStatus,
 } from '@/test-utils/mock-detection';
+import {
+  createGovernanceRpcStub,
+  governanceWriteOptions,
+  passthroughSignTx,
+} from '@/test-utils/governance-rpc';
 
 const SIGNER = 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF';
 const mockSignTx = vi.fn(async (_xdr: string) => 'signedXDR');
 
 describe('governance – castVote', () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
+  it('returns the transaction hash the network issued', async () => {
+    const stub = createGovernanceRpcStub();
+
+    const hash = await castVote(
+      1,
+      'For',
+      SIGNER,
+      passthroughSignTx(),
+      governanceWriteOptions(stub)
+    );
+
+    expect(hash).toBe(stub.issuedHashes[0]);
   });
 
-  afterEach(() => {
-    vi.useRealTimers();
+  it("records the user's confirmed vote choice", async () => {
+    const stub = createGovernanceRpcStub();
+
+    await castVote(2, 'Against', SIGNER, passthroughSignTx(), governanceWriteOptions(stub));
+
+    expect(getUserVote(2)).toBe('Against');
   });
 
-  it('returns a transaction hash string', async () => {
-    vi.runAllTimersAsync();
-    const hash = await castVote(1, 'For', SIGNER, mockSignTx);
-    expect(typeof hash).toBe('string');
-    expect(hash.length).toBeGreaterThan(0);
+  it('crosses the full contract boundary: simulate, sign, submit, confirm', async () => {
+    const stub = createGovernanceRpcStub();
+    const signTx = passthroughSignTx();
+
+    await castVote(6, 'For', SIGNER, signTx, governanceWriteOptions(stub));
+
+    expect(stub.getAccount).toHaveBeenCalledWith(SIGNER);
+    expect(stub.simulateTransaction).toHaveBeenCalledTimes(1);
+    expect(signTx).toHaveBeenCalledTimes(1);
+    expect(stub.sendTransaction).toHaveBeenCalledTimes(1);
+    expect(stub.getTransaction).toHaveBeenCalled();
   });
 
-  it("records the user's vote choice", async () => {
-    vi.runAllTimersAsync();
-    await castVote(2, 'Against', SIGNER, mockSignTx);
-    const recorded = getUserVote(2);
-    expect(recorded).toBe('Against');
-  });
+  it('leaves the contract-owned tally alone', async () => {
+    // Tallies come from `list_proposals`; a local increment is the fabricated
+    // behaviour #1044/#1045 removed.
+    const stub = createGovernanceRpcStub();
+    const before = MOCK_PROPOSALS.map((p) => [p.votesFor, p.votesAgainst]);
 
-  it('increments votesFor when voting For', async () => {
-    const proposalId = 6;
-    const before = MOCK_PROPOSALS.find((p) => p.id === proposalId)?.votesFor ?? 0;
-    vi.runAllTimersAsync();
-    await castVote(proposalId, 'For', SIGNER, mockSignTx);
-    const after = MOCK_PROPOSALS.find((p) => p.id === proposalId)?.votesFor ?? 0;
-    expect(after).toBeGreaterThan(before);
-  });
+    await castVote(1, 'For', SIGNER, passthroughSignTx(), governanceWriteOptions(stub));
 
-  it('increments votesAgainst when voting Against', async () => {
-    const proposalId = 1;
-    const before = MOCK_PROPOSALS.find((p) => p.id === proposalId)?.votesAgainst ?? 0;
-    vi.runAllTimersAsync();
-    await castVote(proposalId, 'Against', SIGNER, mockSignTx);
-    const after = MOCK_PROPOSALS.find((p) => p.id === proposalId)?.votesAgainst ?? 0;
-    expect(after).toBeGreaterThan(before);
+    expect(MOCK_PROPOSALS.map((p) => [p.votesFor, p.votesAgainst])).toEqual(before);
   });
 });
 
@@ -216,8 +242,8 @@ describe('governance – fetchProposal', () => {
 });
 
 describe('governance – createProposal', () => {
-  it('creates a FeeRate proposal and returns txHash + proposalId', async () => {
-    vi.useFakeTimers();
+  it('creates a FeeRate proposal and returns txHash + the contract-assigned id', async () => {
+    const stub = createGovernanceRpcStub({ proposalId: 31 });
     const payload: CreateProposalPayload = {
       formType: 'FeeRate',
       title: 'Reduce fee to 0.2%',
@@ -225,18 +251,19 @@ describe('governance – createProposal', () => {
       newValueBps: 20,
     };
 
-    const promise = createProposal(payload, SIGNER, mockSignTx);
-    vi.runAllTimers();
-    const result = await promise;
-    vi.useRealTimers();
+    const result = await createProposal(
+      payload,
+      SIGNER,
+      passthroughSignTx(),
+      governanceWriteOptions(stub)
+    );
 
-    expect(typeof result.txHash).toBe('string');
-    expect(typeof result.proposalId).toBe('number');
-    expect(result.proposalId).toBeGreaterThan(0);
+    expect(result.txHash).toBe(stub.issuedHashes[0]);
+    expect(result.proposalId).toBe(31);
   });
 
-  it('creates an AddToken proposal with parameterChanges', async () => {
-    vi.useFakeTimers();
+  it('submits an AddToken proposal without appending a local record', async () => {
+    const stub = createGovernanceRpcStub({ proposalId: 32 });
     const payload: CreateProposalPayload = {
       formType: 'AddToken',
       title: 'Add wBTC',
@@ -244,19 +271,24 @@ describe('governance – createProposal', () => {
       tokenAddress: 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC',
       tokenName: 'Wrapped Bitcoin',
     };
+    const beforeCount = MOCK_PROPOSALS.length;
 
-    const promise = createProposal(payload, SIGNER, mockSignTx);
-    vi.runAllTimers();
-    const result = await promise;
-    vi.useRealTimers();
+    const result = await createProposal(
+      payload,
+      SIGNER,
+      passthroughSignTx(),
+      governanceWriteOptions(stub)
+    );
 
-    expect(result.proposalId).toBeGreaterThan(0);
-    const created = MOCK_PROPOSALS.find((p) => p.id === result.proposalId);
-    expect(created?.parameterChanges).toBeDefined();
+    expect(result.proposalId).toBe(32);
+    // The proposal now lives on-chain; the local array is a read-only
+    // fallback and must not grow.
+    expect(MOCK_PROPOSALS.length).toBe(beforeCount);
+    expect(MOCK_PROPOSALS.find((p) => p.id === result.proposalId)).toBeUndefined();
   });
 
-  it('persists the proposal payload and vote state for the created record', async () => {
-    vi.useFakeTimers();
+  it('submits a RemoveToken proposal through the contract boundary', async () => {
+    const stub = createGovernanceRpcStub({ proposalId: 33 });
     const payload: CreateProposalPayload = {
       formType: 'RemoveToken',
       title: 'Remove EURC',
@@ -264,31 +296,22 @@ describe('governance – createProposal', () => {
       removeTokenAddress: 'CDTKPWPLOURQA2SGTKTUQOWRCBZEORB4BWBOMJ3D3ZTQQSGE5F6JBQLV',
     };
 
-    const resultPromise = createProposal(payload, SIGNER, mockSignTx);
-    await vi.runAllTimersAsync();
-    const result = await resultPromise;
-    const created = MOCK_PROPOSALS.find((p) => p.id === result.proposalId);
+    const result = await createProposal(
+      payload,
+      SIGNER,
+      passthroughSignTx(),
+      governanceWriteOptions(stub)
+    );
 
-    expect(created).toMatchObject({
-      proposer: SIGNER,
-      title: payload.title,
-      description: payload.description,
-      type: 'ProtocolUpgrade',
-      status: 'Active',
-      quorumRequired: 100_000,
-    });
-    expect(created?.parameterChanges?.[0]).toMatchObject({
-      parameter: 'accepted_tokens',
-      newValue: expect.stringContaining('removes EURC'),
-    });
-    vi.useRealTimers();
+    expect(result.proposalId).toBe(33);
+    expect(stub.sendTransaction).toHaveBeenCalledTimes(1);
   });
 });
 
 describe('governance – stateful write paths', () => {
-  it('updates the right vote bucket and persists userVote for the proposal', async () => {
-    vi.useFakeTimers();
-    const proposalPromise = createProposal(
+  it('persists only the confirmed userVote, not a synthesised tally', async () => {
+    const stub = createGovernanceRpcStub({ proposalId: 41 });
+    const proposed = await createProposal(
       {
         formType: 'FeeRate',
         title: 'Isolated vote assertion',
@@ -296,23 +319,22 @@ describe('governance – stateful write paths', () => {
         newValueBps: 75,
       },
       SIGNER,
-      mockSignTx
+      passthroughSignTx(),
+      governanceWriteOptions(stub)
     );
-    await vi.runAllTimersAsync();
-    const proposed = await proposalPromise;
 
-    const resultPromise = castVote(proposed.proposalId, 'For', SIGNER, mockSignTx);
-    await vi.runAllTimersAsync();
-    const result = await resultPromise;
-    const created = MOCK_PROPOSALS.find((p) => p.id === proposed.proposalId)!;
+    const result = await castVote(
+      proposed.proposalId,
+      'For',
+      SIGNER,
+      passthroughSignTx(),
+      governanceWriteOptions(stub)
+    );
 
     expect(typeof result).toBe('string');
-    expect(result.length).toBeGreaterThan(0);
     expect(getUserVote(proposed.proposalId)).toBe('For');
-    expect(created.votesFor).toBe(1250);
-    expect(created.votesAgainst).toBe(0);
-    expect(created.votesAbstain).toBe(0);
-    vi.useRealTimers();
+    // No local proposal record exists to carry a tally — the contract owns it.
+    expect(MOCK_PROPOSALS.find((p) => p.id === proposed.proposalId)).toBeUndefined();
   });
 });
 
@@ -560,6 +582,10 @@ describe('governance – simulateProposalEffect', () => {
 describe('governance – mock-backing detection', () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    // Earlier suites in this file vote and create proposals with the same
+    // signer; without clearing the confirmation cache the detector's run
+    // would short-circuit and never reach the contract boundary.
+    clearGovernanceIdempotencyCache();
   });
 
   afterEach(() => {
@@ -572,17 +598,31 @@ describe('governance – mock-backing detection', () => {
     return promise;
   }
 
-  it('castVote (#839): tx hash provenance and signTx usage', async () => {
-    const signTx = vi.fn(async (_xdr: string) => 'signedXDR');
+  // castVote and createProposal are now 'real' (#1044, #1045): they build,
+  // simulate, sign, submit and confirm a Soroban transaction. From here a
+  // regression back to a Math.random()/no-network mock fails this test.
+  //
+  // The stub issues one fixed hash so the identifier is stable across the
+  // detector's repeated runs — a real network returns the same hash for the
+  // same transaction, whereas a Math.random() mock would not.
+  it('castVote (#839): tx hash provenance and contract boundary usage', async () => {
+    const stub = createGovernanceRpcStub({ fixedHash: 'c'.repeat(64) });
+    const signTx = passthroughSignTx();
     const report = await detectMockBacking({
-      run: () => settle(castVote(1, 'For', SIGNER, signTx)),
-      boundaries: { signTx },
+      run: () => castVote(1, 'For', SIGNER, signTx, governanceWriteOptions(stub)),
+      boundaries: {
+        signTx,
+        simulateTransaction: stub.simulateTransaction,
+        sendTransaction: stub.sendTransaction,
+        getTransaction: stub.getTransaction,
+      },
     });
-    expectMockBackingStatus('castVote', report, 'mock');
+    expectMockBackingStatus('castVote', report, 'real');
   });
 
-  it('createProposal (#841): tx hash provenance and signTx usage', async () => {
-    const signTx = vi.fn(async (_xdr: string) => 'signedXDR');
+  it('createProposal (#841): tx hash provenance and contract boundary usage', async () => {
+    const stub = createGovernanceRpcStub({ fixedHash: 'd'.repeat(64), proposalId: 55 });
+    const signTx = passthroughSignTx();
     const payload: CreateProposalPayload = {
       formType: 'FeeRate',
       title: 'Mock detection probe',
@@ -590,11 +630,15 @@ describe('governance – mock-backing detection', () => {
       newValueBps: 40,
     };
     const report = await detectMockBacking({
-      run: () => settle(createProposal(payload, SIGNER, signTx)),
+      run: () => createProposal(payload, SIGNER, signTx, governanceWriteOptions(stub)),
       identify: (result) => result.txHash,
-      boundaries: { signTx },
+      boundaries: {
+        signTx,
+        simulateTransaction: stub.simulateTransaction,
+        sendTransaction: stub.sendTransaction,
+      },
     });
-    expectMockBackingStatus('createProposal', report, 'mock');
+    expectMockBackingStatus('createProposal', report, 'real');
   });
 
   it('fetchProtocolParameters (#844): reaches Soroban RPC or the network', async () => {

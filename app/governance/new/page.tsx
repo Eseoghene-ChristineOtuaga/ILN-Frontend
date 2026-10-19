@@ -38,7 +38,7 @@ interface FormData {
 export default function NewGovernanceProposalPage() {
   const router = useRouter();
   const { address, isConnected } = useWallet();
-  const { loading: txLoading } = useTransaction();
+  const { execute, loading: txLoading, signingModal } = useTransaction();
   const { tokens } = useApprovedTokens();
   const { balances, isLoading: balancesLoading } = useBalances(tokens);
 
@@ -239,13 +239,25 @@ IPFS Hash: ${ipfsHash}`,
         removeTokenAddress: formData.removeTokenAddress,
       };
 
-      // Mock the createProposal to return a Transaction for useTransaction
-      // For now, directly calling the mock createProposal utility
-      const { proposalId } = await createProposal(payload, address, async (xdr) => xdr);
+      // Routed through `execute` so the proposal is signed by the connected
+      // wallet and its outcome reported through the shared transaction
+      // handling: simulation errors surface before the signature prompt
+      // (#1044) and a confirmation timeout is reported as an unknown outcome
+      // rather than a failure (#1045). The previous identity `signTx` echoed
+      // the XDR back unsigned, which a real network always rejects.
+      const result = await execute(async (signTx) => createProposal(payload, address, signTx), {
+        expectedAction: 'create_proposal',
+        title: 'Submitting proposal…',
+        pendingMessage: 'Waiting for wallet signature...',
+        successTitle: 'Proposal submitted',
+        successMessage: 'Your proposal is now on-chain.',
+      });
 
-      // In a real scenario, this would involve building a transaction, signing it, and submitting.
-      // For now, we simulate the redirect.
-      router.push(`/governance/${proposalId}`);
+      // `execute` has already surfaced any failure; only navigate on a
+      // confirmed proposal.
+      if (result) {
+        router.push(`/governance/${result.proposalId}`);
+      }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       alert(`Failed to create proposal: ${msg}`);
@@ -494,7 +506,9 @@ IPFS Hash: ${ipfsHash}`,
         )}
 
         {formData.formType && formData.title && (
-          <div className={`border p-4 rounded-lg ${simulationResult?.isContractVerified ? 'border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950' : 'border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950'}`}>
+          <div
+            className={`border p-4 rounded-lg ${simulationResult?.isContractVerified ? 'border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950' : 'border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950'}`}
+          >
             <div className="flex items-start justify-between mb-2">
               <h3
                 className={`font-semibold ${simulationResult?.isContractVerified ? 'text-green-800 dark:text-green-200' : 'text-blue-800 dark:text-blue-200'}`}
@@ -514,7 +528,9 @@ IPFS Hash: ${ipfsHash}`,
                 {!simulationResult.isContractVerified && (
                   <div className="mt-2 p-2 bg-yellow-50 dark:bg-yellow-950 border border-yellow-200 dark:border-yellow-800 rounded">
                     <p className="text-xs text-yellow-800 dark:text-yellow-200">
-                      ⚠️ <span className="font-semibold">Estimated preview</span> — Not contract-verified. Actual on-chain effect may differ due to protocol updates between proposal creation and execution.
+                      ⚠️ <span className="font-semibold">Estimated preview</span> — Not
+                      contract-verified. Actual on-chain effect may differ due to protocol updates
+                      between proposal creation and execution.
                     </p>
                   </div>
                 )}
@@ -559,6 +575,7 @@ IPFS Hash: ${ipfsHash}`,
           Submit Proposal
         </Button>
       </form>
+      {signingModal}
     </main>
   );
 }

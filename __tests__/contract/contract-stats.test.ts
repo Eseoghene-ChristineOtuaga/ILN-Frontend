@@ -10,14 +10,21 @@ import type { Invoice } from '@/utils/soroban';
 const USDC = 'CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75';
 const EURC = 'CDTKPWPLOURQA2SGTKTUQOWRCBZEORB4BWBOMJ3D3ZTQQSGE5F6JBQLV';
 
-vi.mock('@/constants', () => ({
-  CONTRACT_ID: 'CTEST',
-  NETWORK_PASSPHRASE: 'Test SDF Network ; September 2015',
-  RPC_URL: 'https://soroban-testnet.stellar.org',
-  TESTNET_USDC_TOKEN_ID: 'CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75',
-  TESTNET_EURC_TOKEN_ID: 'CDTKPWPLOURQA2SGTKTUQOWRCBZEORB4BWBOMJ3D3ZTQQSGE5F6JBQLV',
-  TESTNET_XLM_TOKEN_ID: 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC',
-}));
+// Partial mock: only the ids this suite pins are overridden. A wholesale
+// replacement breaks whenever a new constant is added and read at module
+// load (e.g. GOVERNANCE_CONTRACT_CONFIGURED), so spread the real module.
+vi.mock('@/constants', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/constants')>();
+  return {
+    ...actual,
+    CONTRACT_ID: 'CTEST',
+    NETWORK_PASSPHRASE: 'Test SDF Network ; September 2015',
+    RPC_URL: 'https://soroban-testnet.stellar.org',
+    TESTNET_USDC_TOKEN_ID: 'CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75',
+    TESTNET_EURC_TOKEN_ID: 'CDTKPWPLOURQA2SGTKTUQOWRCBZEORB4BWBOMJ3D3ZTQQSGE5F6JBQLV',
+    TESTNET_XLM_TOKEN_ID: 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC',
+  };
+});
 
 // Mock getAllInvoices so we don't hit the real RPC
 vi.mock('@/utils/soroban', async (importOriginal) => {

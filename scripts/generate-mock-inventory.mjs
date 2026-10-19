@@ -231,7 +231,8 @@ export function scanMockInventory(_rootDir = ROOT_DIR) {
       status: 'Real',
       filePath: 'src/utils/governance.ts',
       line: 180,
-      description: 'Calls live list_proposals() on iln_governance contract',
+      description:
+        'Calls list_proposals() on the configured governance contract; falls back to MOCK_PROPOSALS when NEXT_PUBLIC_GOVERNANCE_CONTRACT_ID is unset',
       patternType: 'on-chain-call',
       trackingIssue: '#650',
     },
@@ -248,12 +249,35 @@ export function scanMockInventory(_rootDir = ROOT_DIR) {
     {
       module: 'Governance',
       name: 'castVote',
-      status: 'Mock',
+      status: 'Real',
       filePath: 'src/utils/governance.ts',
-      line: 264,
-      description: 'Returns Math.random() hash and mutates MOCK_VOTES in-memory state',
-      patternType: 'random-hash-mock',
-      trackingIssue: '#839',
+      line: 640,
+      description:
+        'Signed Soroban cast_vote: simulated before signing, confirmed under a bounded poll; no local tally',
+      patternType: 'on-chain-call',
+      trackingIssue: '#1044',
+    },
+    {
+      module: 'Governance',
+      name: 'executeProposal',
+      status: 'Real',
+      filePath: 'src/utils/governance.ts',
+      line: 700,
+      description:
+        'Signed Soroban execute_proposal; status is re-read from the contract rather than set locally',
+      patternType: 'on-chain-call',
+      trackingIssue: '#1045',
+    },
+    {
+      module: 'Governance',
+      name: 'vetoProposal',
+      status: 'Real',
+      filePath: 'src/utils/governance.ts',
+      line: 740,
+      description:
+        'Signed Soroban veto_proposal; admin authorization enforced by simulation before signing',
+      patternType: 'on-chain-call',
+      trackingIssue: '#1044',
     },
     {
       module: 'Governance',
@@ -298,12 +322,13 @@ export function scanMockInventory(_rootDir = ROOT_DIR) {
     {
       module: 'Governance',
       name: 'createProposal',
-      status: 'Mock',
+      status: 'Real',
       filePath: 'src/utils/governance.ts',
-      line: 491,
-      description: 'Generates random proposal ID and returns Math.random() hash',
-      patternType: 'random-hash-mock',
-      trackingIssue: '#841',
+      line: 1030,
+      description:
+        'Signed Soroban create_proposal; the proposal id comes from the contract return value',
+      patternType: 'on-chain-call',
+      trackingIssue: '#1044',
     },
     {
       module: 'Governance',
@@ -324,7 +349,7 @@ export function scanMockInventory(_rootDir = ROOT_DIR) {
       pattern: 'Math.random().toString(16).substring(2, 18)',
       category: 'fake-hash',
       snippet: 'const txHash = Math.random().toString(16).substring(2, 18);',
-      status: 'remediation-in-progress',
+      status: 'resolved',
     },
     {
       filePath: 'src/utils/governance.ts',
@@ -332,7 +357,7 @@ export function scanMockInventory(_rootDir = ROOT_DIR) {
       pattern: 'MOCK_VOTES.push(...)',
       category: 'in-memory-mutation',
       snippet: 'MOCK_VOTES.push(userVote);',
-      status: 'remediation-in-progress',
+      status: 'resolved',
     },
     {
       filePath: 'src/utils/governance.ts',
@@ -372,7 +397,7 @@ export function scanMockInventory(_rootDir = ROOT_DIR) {
       pattern: 'Math.random().toString(16).substring(2, 18)',
       category: 'fake-hash',
       snippet: 'txHash: Math.random().toString(16).substring(2, 18)',
-      status: 'remediation-in-progress',
+      status: 'resolved',
     },
     {
       filePath: 'src/utils/soroban.ts',

@@ -22,6 +22,7 @@ import {
 } from '@/lib/contract/errors';
 import { formatContractError } from '@/utils/contractErrorFormatter';
 import { TransactionErrorToast } from '@/components/transaction/TransactionErrorToast';
+import { GovernanceTxError, type GovernanceTxErrorCode } from '@/lib/governance-tx';
 import { useTransactionPreview } from './useTransactionPreview';
 import type { ExpectedTransactionAction } from '@/utils/transactionPattern';
 import { NETWORK_NAME } from '@/constants';
@@ -55,6 +56,28 @@ export interface UseTransactionResult {
   txHash: string | null;
   signingModal: ReactNode;
 }
+
+/**
+ * Toast titles per governance failure code (#1044, #1045).
+ *
+ * Each one names what actually happened, so "we stopped waiting" never reads
+ * as "it failed" and a pre-signing rejection never reads as an on-chain one.
+ */
+const GOVERNANCE_ERROR_TITLES: Partial<Record<GovernanceTxErrorCode, string>> = {
+  CONTRACT_NOT_CONFIGURED: 'Governance not available',
+  ENTRYPOINT_MISSING: 'Governance not available',
+  SOURCE_ACCOUNT_MISSING: 'Wallet account unavailable',
+  SIMULATION_UNAUTHORIZED: 'Not authorized',
+  SIMULATION_INSUFFICIENT_RESOURCES: 'Transaction too large',
+  SIMULATION_ARCHIVED_STATE: 'Proposal state archived',
+  PROPOSAL_NOT_FOUND: 'Proposal not found',
+  SIMULATION_CONTRACT_ERROR: 'Action rejected by contract',
+  SIMULATION_FAILED: 'Could not simulate action',
+  USER_REJECTED: 'Transaction cancelled',
+  SUBMISSION_REJECTED: 'Submission rejected',
+  TX_FAILED: 'Transaction failed on-chain',
+  TX_TIMEOUT: 'Still confirming — outcome unknown',
+};
 
 function isWalletRejection(message: string) {
   return /reject|cancel|denied|declined|user rejected|user declined/i.test(message);
@@ -355,6 +378,45 @@ export function useTransaction(): UseTransactionResult {
             title: 'Wrong network',
             message: `${classification.message}. Switch your wallet to ${resolvedOptions.expectedAction ? 'the required' : 'the correct'} network, then try again. No changes were made.`,
           });
+          activeToastIdRef.current = null;
+          return null;
+        }
+
+        // Governance writes carry their own classification and remediation
+        // (#1044, #1045), so they bypass the generic contract-error mapping.
+        // The three outcomes stay visibly distinct: a bounded-confirmation
+        // timeout is reported as an *unknown* outcome with no Retry action,
+        // because the transaction may still confirm and re-submitting could
+        // apply the vote twice.
+        if (err instanceof GovernanceTxError) {
+          const isTimeout = err.code === 'TX_TIMEOUT';
+          setError(err.remediation);
+          setSuccess(false);
+          setLifecycle(isTimeout ? 'confirming' : 'failed');
+          setTxHash(err.txHash ?? null);
+
+          recordSigningAttempt({
+            flow: resolvedOptions.expectedAction ?? 'governance',
+            success: false,
+            errorCode: err.code,
+            errorMessage: err.message,
+          });
+
+          updateToast(toastId, {
+            type: isTimeout ? 'warning' : 'error',
+            title: GOVERNANCE_ERROR_TITLES[err.code] ?? 'Governance action failed',
+            message: (
+              <TransactionErrorToast
+                message={err.message}
+                remediation={err.remediation}
+                technicalDetails={err.diagnostics}
+              />
+            ),
+            txHash: err.txHash,
+            // Only offer a retry when the action provably did not land.
+            action: err.resubmitSafe ? { label: 'Retry', onClick: retry } : undefined,
+          });
+
           activeToastIdRef.current = null;
           return null;
         }
