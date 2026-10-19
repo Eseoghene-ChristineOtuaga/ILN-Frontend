@@ -10,12 +10,46 @@
  */
 
 import { sep10Session } from '@/lib/sep10Session';
+import { nativeToScVal, rpc } from '@stellar/stellar-sdk';
+import { vi } from 'vitest';
 
 let sessionCounter = 0;
+let votingPowerSpy: ReturnType<typeof vi.spyOn> | null = null;
+
+export function stubDefaultVotingPower(power = 1250n): void {
+  if (votingPowerSpy) return;
+  votingPowerSpy = vi
+    .spyOn(rpc.Server.prototype, 'simulateTransaction')
+    .mockImplementation(async (tx: any) => {
+      const op = tx?.operations?.[0];
+      if (op?.function === 'get_voting_power') {
+        return {
+          transactionData: {},
+          minResourceFee: '100',
+          events: [],
+          latestLedger: 1,
+          id: '1',
+          _parsed: true,
+          result: { auth: [], retval: nativeToScVal(power, { type: 'i128' }) },
+        } as unknown as rpc.Api.SimulateTransactionResponse;
+      }
+      return {
+        error: 'offline',
+      } as unknown as rpc.Api.SimulateTransactionResponse;
+    });
+}
+
+export function restoreDefaultVotingPower(): void {
+  if (votingPowerSpy) {
+    votingPowerSpy.mockRestore();
+    votingPowerSpy = null;
+  }
+}
 
 /** Establish a valid session for `accountId` (defaults to a fixed test account). */
 export function establishGovernanceTestSession(
-  accountId = 'GABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+  accountId = 'GABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+  defaultVotingPower = 1250n
 ): void {
   sessionCounter += 1;
   sep10Session.setSession({
@@ -25,9 +59,11 @@ export function establishGovernanceTestSession(
     expiresAt: Math.floor(Date.now() / 1000) + 24 * 60 * 60,
     homeDomain: 'iln.test',
   });
+  stubDefaultVotingPower(defaultVotingPower);
 }
 
 /** Tear down the fixture session between tests. */
 export function clearGovernanceTestSession(): void {
   sep10Session.clearSession();
+  restoreDefaultVotingPower();
 }

@@ -49,6 +49,9 @@ export function governanceInvalidationKeys(
   }
   if (scope.voterAddress) {
     keys.push(governanceKeys.votingPower(scope.voterAddress));
+    keys.push(governanceKeys.activity(scope.voterAddress));
+  } else {
+    keys.push(governanceKeys.activity());
   }
 
   return keys;

@@ -503,14 +503,13 @@ describe('governance – getVotingPower', () => {
     expect(power).toBeGreaterThan(0);
   });
 
-  it('returns 0 when the contract simulation is unsuccessful', async () => {
+  it('fails closed when the contract simulation is unsuccessful (#1049)', async () => {
     const mockSimulate = vi
       .spyOn(rpc.Server.prototype, 'simulateTransaction')
       .mockResolvedValueOnce({ error: 'simulation failed' } as any);
 
-    const power = await getVotingPower(SIGNER);
+    await expect(getVotingPower(SIGNER)).rejects.toThrow(/VOTING_POWER_UNAVAILABLE/);
     mockSimulate.mockRestore();
-    expect(power).toBe(0);
   });
 });
 

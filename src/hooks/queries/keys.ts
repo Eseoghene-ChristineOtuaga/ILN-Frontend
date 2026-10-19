@@ -47,6 +47,9 @@ export const governanceKeys = {
   /** Voting power for an address (changes when balances / delegation change). */
   votingPower: (address: string | null | undefined) =>
     ['governance', 'voting-power', address ?? ''] as const,
+  /** Governance activity / vote history for an address (#1047). */
+  activity: (address?: string | null | undefined) =>
+    ['governance', 'activity', address ?? ''] as const,
   /** Recent `ParameterUpdated` contract events for announcement banners. */
   parameterUpdates: ['parameter-updates'] as const,
 };
@@ -85,6 +88,8 @@ export const QUERY_TIMINGS = {
   governanceProposalDetail: { staleTime: 30_000, gcTime: 5 * 60_000 },
   /** Voting power — refreshed after a confirmed vote/delegation mutation. */
   governanceVotingPower: { staleTime: 30_000, gcTime: 5 * 60_000 },
+  /** Governance activity / votes — refreshed after a confirmed mutation (#1047). */
+  governanceActivity: { staleTime: 30_000, gcTime: 5 * 60_000 },
   /** Reputation score — steady, updated periodically. */
   reputation: { staleTime: 30_000, gcTime: 5 * 60_000 },
   /** Protocol status — critical for maintenance banner, poll frequently. */

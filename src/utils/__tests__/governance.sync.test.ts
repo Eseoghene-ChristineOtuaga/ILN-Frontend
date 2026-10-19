@@ -471,21 +471,25 @@ describe('governance confirmation reconciliation (#1064)', () => {
   });
 });
 
-// ─── #1065 governance query cache invalidation ───────────────────────────────
+// ─── #1065 / #1047 governance query cache invalidation ───────────────────────
 
-describe('governance query cache invalidation (#1065)', () => {
-  it('derives the proposals list plus the scoped detail and power keys', () => {
+describe('governance query cache invalidation (#1065, #1047)', () => {
+  it('derives the proposals list plus the scoped detail, power, and activity keys', () => {
     const keys = governanceInvalidationKeys({ proposalId: 7, voterAddress: SIGNER });
 
     expect(keys).toEqual([
       governanceKeys.proposals,
       governanceKeys.proposal(7),
       governanceKeys.votingPower(SIGNER),
+      governanceKeys.activity(SIGNER),
     ]);
   });
 
-  it('always invalidates the proposals list, even with an empty scope', () => {
-    expect(governanceInvalidationKeys()).toEqual([governanceKeys.proposals]);
+  it('always invalidates the proposals list and activity, even with an empty scope', () => {
+    expect(governanceInvalidationKeys()).toEqual([
+      governanceKeys.proposals,
+      governanceKeys.activity(),
+    ]);
   });
 
   it('invalidateGovernanceMutationQueries refreshes every dependent query', async () => {
@@ -503,10 +507,11 @@ describe('governance query cache invalidation (#1065)', () => {
       governanceKeys.proposals,
       governanceKeys.proposal(3),
       governanceKeys.votingPower(SIGNER),
+      governanceKeys.activity(SIGNER),
     ]);
   });
 
-  it('a confirmed mutation refreshes the proposal and power queries', async () => {
+  it('a confirmed mutation refreshes proposal, activity, and voting-power data', async () => {
     const invalidator = invalidatorSpy();
     const onConfirmed = vi.fn((hash: string) =>
       invalidateGovernanceMutationQueries(invalidator, {
@@ -523,13 +528,14 @@ describe('governance query cache invalidation (#1065)', () => {
 
     expect(onConfirmed).toHaveBeenCalledTimes(1);
     expect(onConfirmed).toHaveBeenCalledWith(hash);
-    expect(invalidator.invalidateQueries).toHaveBeenCalledTimes(3);
+    expect(invalidator.invalidateQueries).toHaveBeenCalledTimes(4);
     const invalidatedKeys = invalidator.invalidateQueries.mock.calls.map(
       ([filters]) => filters.queryKey
     );
     expect(invalidatedKeys).toContainEqual(governanceKeys.proposals);
     expect(invalidatedKeys).toContainEqual(governanceKeys.proposal(3));
     expect(invalidatedKeys).toContainEqual(governanceKeys.votingPower(SIGNER));
+    expect(invalidatedKeys).toContainEqual(governanceKeys.activity(SIGNER));
   });
 
   it('regression: a failed simulation invalidates no query cache (#1063/#1065)', async () => {

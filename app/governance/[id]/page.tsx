@@ -10,6 +10,7 @@ import { GOVERNANCE_ADMIN_ADDRESS } from '@/constants';
 import { useWallet } from '@/context/WalletContext';
 import { useDocumentTitle } from '@/hooks/useDocumentTitle';
 import { useTransaction } from '@/hooks/useTransaction';
+import { useInvalidateGovernanceQueries } from '@/hooks/queries';
 import { hashEvidence } from '@/utils/evidence';
 import {
   Proposal,
@@ -187,12 +188,15 @@ export default function ProposalDetailPage() {
   const router = useRouter();
   const { address, isConnected, connect } = useWallet();
   const { execute, loading: isVoting } = useTransaction();
+  const invalidateGovernanceQueries = useInvalidateGovernanceQueries();
 
   const proposalId = Number(params.id);
 
   const [proposal, setProposal] = useState<Proposal | null>(null);
   const [loading, setLoading] = useState(true);
   const [votingPower, setVotingPower] = useState<number>(0);
+  const [votingPowerError, setVotingPowerError] = useState<string | null>(null);
+  const [loadingVotingPower, setLoadingVotingPower] = useState(false);
   const [isExecuting, setIsExecuting] = useState(false);
   const [vetoModalOpen, setVetoModalOpen] = useState(false);
   const [vetoReason, setVetoReason] = useState('');
@@ -218,20 +222,48 @@ export default function ProposalDetailPage() {
 
   useEffect(() => {
     if (isConnected && address) {
-      getVotingPower(address).then(setVotingPower);
+      setLoadingVotingPower(true);
+      setVotingPowerError(null);
+      getVotingPower(address)
+        .then((power) => {
+          setVotingPower(power);
+          setVotingPowerError(null);
+        })
+        .catch((err) => {
+          setVotingPower(0);
+          setVotingPowerError(err instanceof Error ? err.message : 'Voting power unavailable');
+        })
+        .finally(() => {
+          setLoadingVotingPower(false);
+        });
+    } else {
+      setVotingPower(0);
+      setVotingPowerError(null);
+      setLoadingVotingPower(false);
     }
   }, [isConnected, address]);
 
   const handleVote = async (choice: VoteChoice) => {
-    if (!proposal || !address) return;
+    if (!proposal || !address || votingPowerError || votingPower <= 0) return;
 
-    const result = await execute(async (signTx) => castVote(proposal.id, choice, address, signTx), {
-      expectedAction: 'cast_vote',
-      title: `Casting vote: ${choice}…`,
-      pendingMessage: 'Waiting for wallet signature...',
-      successTitle: 'Vote submitted',
-      successMessage: `Your ${choice.toLowerCase()} vote has been recorded.`,
-    });
+    const result = await execute(
+      async (signTx) =>
+        castVote(proposal.id, choice, address, signTx, {
+          onConfirmed: async () => {
+            await invalidateGovernanceQueries({
+              proposalId: proposal.id,
+              voterAddress: address,
+            });
+          },
+        }),
+      {
+        expectedAction: 'cast_vote',
+        title: `Casting vote: ${choice}…`,
+        pendingMessage: 'Waiting for wallet signature...',
+        successTitle: 'Vote submitted',
+        successMessage: `Your ${choice.toLowerCase()} vote has been recorded.`,
+      }
+    );
 
     if (result) {
       await load();
@@ -249,6 +281,23 @@ export default function ProposalDetailPage() {
       successTitle: 'Proposal executed',
       successMessage: 'The proposal has been successfully executed.',
     });
+    const result = await execute(
+      async (signTx) =>
+        executeProposal(proposal.id, address, signTx, {
+          onConfirmed: async () => {
+            await invalidateGovernanceQueries({
+              proposalId: proposal.id,
+              voterAddress: address,
+            });
+          },
+        }),
+      {
+        title: 'Executing proposal…',
+        pendingMessage: 'Waiting for wallet signature...',
+        successTitle: 'Proposal executed',
+        successMessage: 'The proposal has been successfully executed.',
+      }
+    );
 
     if (result) {
       await load();
@@ -281,6 +330,34 @@ export default function ProposalDetailPage() {
     );
 
     if (result) {
+    const toastId = addToast({ type: 'pending', title: 'Vetoing proposal...' });
+    try {
+      const txHash = await vetoProposal(proposal.id, vetoReasonHash, address, signTx, {
+        onConfirmed: async () => {
+          await invalidateGovernanceQueries({
+            proposalId: proposal.id,
+            voterAddress: address,
+          });
+        },
+      });
+      updateToast(toastId, {
+        type: 'success',
+        title: 'Proposal vetoed',
+        txHash,
+      });
+      setProposal({
+        ...proposal,
+        status: 'Vetoed',
+        vetoHistory: [
+          {
+            proposalId: proposal.id,
+            admin: address,
+            reasonHash: vetoReasonHash,
+            createdAt: Math.floor(Date.now() / 1000),
+          },
+          ...(proposal.vetoHistory ?? []),
+        ],
+      });
       setVetoModalOpen(false);
       setVetoReason('');
       setVetoReasonHash('');
@@ -298,7 +375,8 @@ export default function ProposalDetailPage() {
   const isActive = proposal?.status === 'Active';
   const isPassed = proposal?.status === 'Passed';
   const isAdmin = !!address && address === GOVERNANCE_ADMIN_ADDRESS;
-  const canVote = isActive && !alreadyVoted && isConnected && votingPower > 0;
+  const canVote =
+    isActive && !alreadyVoted && isConnected && votingPower > 0 && !votingPowerError;
 
   const remaining = proposal ? timeRemaining(proposal) : '';
   const now = Math.floor(Date.now() / 1000);
@@ -519,14 +597,25 @@ export default function ProposalDetailPage() {
                   Your Voting Power
                 </p>
                 {isConnected ? (
-                  <div className="flex items-baseline gap-2">
-                    <span className="text-2xl font-bold text-primary">
-                      {formatVotingPower(votingPower)}
-                    </span>
-                    {votingPower === 0 && (
-                      <span className="text-xs text-on-surface-variant">(no voting power)</span>
-                    )}
-                  </div>
+                  votingPowerError ? (
+                    <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-xl text-red-500 text-xs">
+                      <p className="font-semibold">Voting Power Unavailable</p>
+                      <p className="text-on-surface-variant mt-0.5">
+                        Could not verify voting power from governance authority. Voting is disabled.
+                      </p>
+                    </div>
+                  ) : loadingVotingPower ? (
+                    <div className="h-8 bg-surface-container animate-pulse rounded" />
+                  ) : (
+                    <div className="flex items-baseline gap-2">
+                      <span className="text-2xl font-bold text-primary">
+                        {formatVotingPower(votingPower)}
+                      </span>
+                      {votingPower === 0 && (
+                        <span className="text-xs text-on-surface-variant">(no voting power)</span>
+                      )}
+                    </div>
+                  )
                 ) : (
                   <button
                     onClick={connect}

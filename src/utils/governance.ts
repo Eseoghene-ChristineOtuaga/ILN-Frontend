@@ -267,7 +267,7 @@ export const GOVERNANCE_INTEGRATION_STATUS: Record<
     label: 'Proposal veto',
   },
   getVotingPower: {
-    status: 'Stubbed',
+    status: 'Real',
     label: 'Voting power lookup',
   },
   getGovTokenBalance: {
@@ -479,21 +479,36 @@ const proposalCreationInFlight: Map<
   string,
   Promise<{ txHash: string; proposalId: number }>
 > = new Map();
+// In-flight mutations, so concurrent duplicate submissions share one transaction (#1046).
+const voteInFlight: Map<string, Promise<string>> = new Map();
+const executeInFlight: Map<string, Promise<string>> = new Map();
+const vetoInFlight: Map<string, Promise<string>> = new Map();
 
 export function clearGovernanceIdempotencyCache(): void {
   proposalTxHashes.clear();
   proposalCreationCache.clear();
   proposalCreationInFlight.clear();
+  voteInFlight.clear();
+  executeInFlight.clear();
+  vetoInFlight.clear();
 }
 
 export function getUserVote(proposalId: number): VoteChoice | undefined {
   return userVotes.get(proposalId);
 }
 
+export class VotingPowerError extends Error {
+  readonly code = 'VOTING_POWER_UNAVAILABLE';
+  constructor(message: string, readonly cause?: unknown) {
+    super(`VOTING_POWER_UNAVAILABLE: ${message}`);
+    this.name = 'VotingPowerError';
+  }
+}
+
 /**
  * Optional, additive hooks for every governance write path.
  *
- * Both callbacks are opt-in so existing call sites keep their behaviour:
+ * Callbacks are opt-in so existing call sites keep their behaviour:
  *
  * - `simulate` runs a Soroban dry-run *before* the wallet prompt. A failed
  *   simulation throws a typed {@link import('@/lib/governance/simulation').GovernanceSimulationError}
@@ -501,10 +516,13 @@ export function getUserVote(proposalId: number): VoteChoice | undefined {
  * - `onConfirmed` runs only after the mutation has completed successfully.
  *   Query-cache invalidation belongs here so rejected / failed / pending
  *   writes cannot refresh data (#1065).
+ * - `votingPower` explicit voting power to apply; if omitted, read from the
+ *   governance contract authority (#1048, #1049).
  */
 export interface GovernanceMutationOptions {
   simulate?: () => Promise<GovernanceSimulationOutcome>;
   onConfirmed?: (txHash: string) => void | Promise<void>;
+  votingPower?: number;
 }
 
 // ─── Contract Parsers ─────────────────────────────────────────────────────────
@@ -822,12 +840,9 @@ export async function castVote(
   options: GovernanceMutationOptions = {}
 ): Promise<string> {
   requireSep10Session(signerAddress);
-  // TODO: Replace with actual Soroban transaction once governance contract is deployed
-  // Ref: #111
-  await new Promise((r) => setTimeout(r, 2000));
 
-  const proposal = MOCK_PROPOSALS.find((p) => p.id === proposalId);
   const cacheKey = `${signerAddress || 'anon'}:vote:${proposalId}`;
+  const inFlightKey = `${signerAddress || 'anon'}:vote:${proposalId}:${choice}`;
   const previousVote = userVotes.get(proposalId);
 
   // Idempotent replay of an identical, already-confirmed vote: return the
@@ -854,25 +869,22 @@ export async function castVote(
   if (options.simulate) {
     await assertGovernanceSimulationPassed(options.simulate);
   }
+  // Concurrent deduplication: rapid duplicate submissions share one in-flight transaction (#1046).
+  const inFlight = voteInFlight.get(inFlightKey);
+  if (inFlight) return inFlight;
 
-  // Signature gate before any mutation: a declined wallet changes nothing (#1144).
-  const signed = await requireGovernanceSignature(
-    `vote:${proposalId}:${choice}:${signerAddress}`,
-    signerAddress,
-    signTx
-  );
+  const run = (async () => {
+    // TODO: Replace with actual Soroban transaction once governance contract is deployed
+    // Ref: #111
+    await new Promise((r) => setTimeout(r, 2000));
 
-  // If user changed their vote, adjust previous choice count
-  if (proposal && previousVote && previousVote !== choice) {
-    const power = 1250;
-    if (previousVote === 'For') {
-      proposal.votesFor = Math.max(0, proposal.votesFor - power);
-    } else if (previousVote === 'Against') {
-      proposal.votesAgainst = Math.max(0, proposal.votesAgainst - power);
-    } else if (previousVote === 'Abstain') {
-      proposal.votesAbstain = Math.max(0, (proposal.votesAbstain ?? 0) - power);
+    const proposal = MOCK_PROPOSALS.find((p) => p.id === proposalId);
+
+    // Dry-run before the wallet prompt: a failed simulation is rendered to the
+    // user without ever opening the wallet, and nothing is mutated (#1063).
+    if (options.simulate) {
+      await assertGovernanceSimulationPassed(options.simulate);
     }
-  }
 
   // Only a confirmed settlement updates local state (#1142).
   userVotes.set(proposalId, choice);
@@ -880,6 +892,69 @@ export async function castVote(
   // Cache refresh is a confirmed-only concern (#1065).
   await options.onConfirmed?.(txHash);
   return txHash;
+    // Fail closed if voting power cannot be verified (#1049)
+    let power = options.votingPower;
+    if (power === undefined && signerAddress) {
+      try {
+        power = await getVotingPower(signerAddress);
+      } catch (err) {
+        throw new Error(
+          `VOTING_POWER_UNAVAILABLE: Voting power could not be verified from governance authority (${
+            err instanceof Error ? err.message : String(err)
+          }). Mutation blocked.`
+        );
+      }
+    }
+
+    if (signerAddress && (power === undefined || power <= 0)) {
+      throw new Error(
+        'VOTING_POWER_UNAVAILABLE: Voter has zero or unavailable voting power. Mutation blocked.'
+      );
+    }
+
+    const effectivePower = power ?? 0;
+
+    // Signature gate before any mutation: a declined wallet changes nothing (#1144).
+    const signed = await requireGovernanceSignature(
+      `vote:${proposalId}:${choice}:${signerAddress}`,
+      signerAddress,
+      signTx
+    );
+
+    // If user changed their vote, adjust previous choice count
+    if (proposal && previousVote && previousVote !== choice) {
+      if (previousVote === 'For') {
+        proposal.votesFor = Math.max(0, proposal.votesFor - effectivePower);
+      } else if (previousVote === 'Against') {
+        proposal.votesAgainst = Math.max(0, proposal.votesAgainst - effectivePower);
+      } else if (previousVote === 'Abstain') {
+        proposal.votesAbstain = Math.max(0, (proposal.votesAbstain ?? 0) - effectivePower);
+      }
+    }
+
+    userVotes.set(proposalId, choice);
+
+    if (proposal && previousVote !== choice) {
+      if (choice === 'For') proposal.votesFor += effectivePower;
+      else if (choice === 'Against') proposal.votesAgainst += effectivePower;
+      else if (choice === 'Abstain') proposal.votesAbstain = (proposal.votesAbstain ?? 0) + effectivePower;
+    }
+
+    // Deterministic hash rooted in the collected signature; cached so an
+    // idempotent replay returns the identical confirmation (#1141, #1146).
+    const txHash = deriveGovernanceTxHash(signed, `vote:${proposalId}:${choice}:${signerAddress}`);
+    proposalTxHashes.set(cacheKey, txHash);
+    // Cache refresh is a confirmed-only concern (#1065).
+    await options.onConfirmed?.(txHash);
+    return txHash;
+  })();
+
+  voteInFlight.set(inFlightKey, run);
+  try {
+    return await run;
+  } finally {
+    voteInFlight.delete(inFlightKey);
+  }
 }
 
 /**
@@ -900,9 +975,6 @@ export async function executeProposal(
   options: GovernanceMutationOptions = {}
 ): Promise<string> {
   requireSep10Session(signerAddress);
-  // TODO: Replace with actual Soroban transaction once governance contract is deployed
-  // Ref: #111
-  await new Promise((r) => setTimeout(r, 2000));
 
   const proposal = MOCK_PROPOSALS.find((p) => p.id === proposalId);
   if (!proposal) throw new Error('Proposal not found');
@@ -925,16 +997,42 @@ export async function executeProposal(
   if (options.simulate) {
     await assertGovernanceSimulationPassed(options.simulate);
   }
+  // Concurrent deduplication: rapid duplicate executions share one in-flight transaction (#1046).
+  const inFlight = executeInFlight.get(cacheKey);
+  if (inFlight) return inFlight;
 
-  const executedSigned = await requireGovernanceSignature(
-    `execute:${proposalId}:${signerAddress}`,
-    signerAddress,
-    signTx
-  );
+  const run = (async () => {
+    // TODO: Replace with actual Soroban transaction once governance contract is deployed
+    // Ref: #111
+    await new Promise((r) => setTimeout(r, 2000));
 
   proposalTxHashes.set(cacheKey, txHash);
   await options.onConfirmed?.(txHash);
   return txHash;
+    // Simulation fails before signing: no wallet prompt, no status change (#1063).
+    if (options.simulate) {
+      await assertGovernanceSimulationPassed(options.simulate);
+    }
+
+    const executedSigned = await requireGovernanceSignature(
+      `execute:${proposalId}:${signerAddress}`,
+      signerAddress,
+      signTx
+    );
+
+    proposal.status = 'Executed';
+    const txHash = deriveGovernanceTxHash(executedSigned, `execute:${proposalId}`);
+    proposalTxHashes.set(cacheKey, txHash);
+    await options.onConfirmed?.(txHash);
+    return txHash;
+  })();
+
+  executeInFlight.set(cacheKey, run);
+  try {
+    return await run;
+  } finally {
+    executeInFlight.delete(cacheKey);
+  }
 }
 
 /**
@@ -956,7 +1054,6 @@ export async function vetoProposal(
   options: GovernanceMutationOptions = {}
 ): Promise<string> {
   requireSep10Session(adminAddress);
-  await new Promise((r) => setTimeout(r, 1200));
 
   const proposal = MOCK_PROPOSALS.find((p) => p.id === proposalId);
   if (!proposal) throw new Error('Proposal not found');
@@ -983,13 +1080,12 @@ export async function vetoProposal(
   if (options.simulate) {
     await assertGovernanceSimulationPassed(options.simulate);
   }
+  // Concurrent deduplication: rapid duplicate vetoes share one in-flight transaction (#1046).
+  const inFlight = vetoInFlight.get(cacheKey);
+  if (inFlight) return inFlight;
 
-  // Signature gate before any mutation (#1144).
-  const signed = await requireGovernanceSignature(
-    `veto:${proposalId}:${reasonHash}:${adminAddress}`,
-    adminAddress,
-    signTx
-  );
+  const run = (async () => {
+    await new Promise((r) => setTimeout(r, 1200));
 
   // Confirmed on-chain: record the settled veto so the detail page can show
   // it before the next contract read completes.
@@ -1004,11 +1100,40 @@ export async function vetoProposal(
   };
   vetoHistory.unshift(record);
   proposal.vetoHistory = [record, ...(proposal.vetoHistory ?? [])];
+    // Simulation fails before signing: no wallet prompt, no veto record (#1063).
+    if (options.simulate) {
+      await assertGovernanceSimulationPassed(options.simulate);
+    }
 
-  const vetoTxHash = deriveGovernanceTxHash(signed, `veto:${proposalId}:${reasonHash}`);
-  proposalTxHashes.set(cacheKey, vetoTxHash);
-  await options.onConfirmed?.(vetoTxHash);
-  return vetoTxHash;
+    // Signature gate before any mutation (#1144).
+    const signed = await requireGovernanceSignature(
+      `veto:${proposalId}:${reasonHash}:${adminAddress}`,
+      adminAddress,
+      signTx
+    );
+
+    proposal.status = 'Vetoed';
+    const record: VetoRecord = {
+      proposalId,
+      admin: adminAddress,
+      reasonHash,
+      createdAt: Math.floor(Date.now() / 1000),
+    };
+    vetoHistory.unshift(record);
+    proposal.vetoHistory = [record, ...(proposal.vetoHistory ?? [])];
+
+    const vetoTxHash = deriveGovernanceTxHash(signed, `veto:${proposalId}:${reasonHash}`);
+    proposalTxHashes.set(cacheKey, vetoTxHash);
+    await options.onConfirmed?.(vetoTxHash);
+    return vetoTxHash;
+  })();
+
+  vetoInFlight.set(cacheKey, run);
+  try {
+    return await run;
+  } finally {
+    vetoInFlight.delete(cacheKey);
+  }
 }
 
 export function getVetoHistory(proposalId: number): VetoRecord[] {
@@ -1016,21 +1141,25 @@ export function getVetoHistory(proposalId: number): VetoRecord[] {
 }
 
 export async function getVotingPower(address: string): Promise<number> {
+  if (!address || !isValidStellarAddress(address)) {
+    throw new VotingPowerError('Invalid or missing Stellar address for voting power read');
+  }
+  let callResult: rpc.Api.SimulateTransactionResponse;
   try {
     const params: xdr.ScVal[] = [Address.fromString(address).toScVal()];
-    const callResult = await server.simulateTransaction(
-      buildTokenReadTransaction(ILN_TOKEN_CONTRACT_ID, 'balance', params)
+    callResult = await server.simulateTransaction(
+      buildGovernanceReadTransaction('get_voting_power', params)
     );
-    if (!rpc.Api.isSimulationSuccess(callResult) || !callResult.result?.retval) {
-      // No authoritative balance available: report zero rather than a
-      // fabricated voting-power constant.
-      return 0;
-    }
-    const balance = BigInt(scValToNative(callResult.result.retval));
-    return Number(balance);
-  } catch {
-    return 0;
+  } catch (err) {
+    throw new VotingPowerError('Failed to simulate voting power read on governance contract', err);
   }
+  if (!rpc.Api.isSimulationSuccess(callResult) || !callResult.result?.retval) {
+    throw new VotingPowerError(
+      'Governance authority returned an unsuccessful simulation for voting power'
+    );
+  }
+  const balance = BigInt(scValToNative(callResult.result.retval));
+  return Number(balance);
 }
 
 /**

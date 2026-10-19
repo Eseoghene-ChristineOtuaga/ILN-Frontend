@@ -8,9 +8,11 @@ export * from './keys';
 export * from './defaultConfig';
 export * from './governanceInvalidation';
 export {
+  useGovernanceActivity,
   useGovernanceProposal,
   useGovernanceProposals,
   useGovernanceVotingPower,
+  useInvalidateGovernanceQueries,
 } from './useGovernance';
 export { useInvoiceCount } from './useInvoiceCount';
 export { useInvoice, useInvoices, useFundInvoice } from './useInvoices';

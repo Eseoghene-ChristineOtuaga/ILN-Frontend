@@ -1,14 +1,21 @@
 'use client';
 
-import { useQuery } from '@tanstack/react-query';
+import { useCallback } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   fetchProposal,
   fetchProposals,
+  fetchVotesForAddress,
   getVotingPower,
   type Proposal,
+  type VoteCastEvent,
 } from '@/utils/governance';
 import { governanceKeys, QUERY_TIMINGS } from './keys';
 import { createQueryConfig } from './defaultConfig';
+import {
+  invalidateGovernanceMutationQueries,
+  type GovernanceMutationScope,
+} from './governanceInvalidation';
 
 /**
  * Governance proposal list.
@@ -50,3 +57,28 @@ export function useGovernanceVotingPower(address?: string | null) {
     }),
   });
 }
+
+/** Voting activity for `address`; disabled until an address is available (#1047). */
+export function useGovernanceActivity(address?: string | null) {
+  return useQuery<VoteCastEvent[], Error>({
+    queryKey: governanceKeys.activity(address),
+    queryFn: () => fetchVotesForAddress(address ?? ''),
+    enabled: Boolean(address),
+    ...createQueryConfig({
+      ...QUERY_TIMINGS.governanceActivity,
+    }),
+  });
+}
+
+/**
+ * Hook to invalidate governance query cache after confirmed ledger success (#1047).
+ */
+export function useInvalidateGovernanceQueries() {
+  const queryClient = useQueryClient();
+  return useCallback(
+    (scope: GovernanceMutationScope = {}) =>
+      invalidateGovernanceMutationQueries(queryClient, scope),
+    [queryClient]
+  );
+}
+
