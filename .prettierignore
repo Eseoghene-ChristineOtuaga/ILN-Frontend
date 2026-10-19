@@ -45,3 +45,7 @@ public/mockServiceWorker.js
 # next-pwa (regenerated on every build)
 public/sw.js
 public/workbox-*.js
+
+# Auto-generated docs
+docs/mock-inventory.md
+
