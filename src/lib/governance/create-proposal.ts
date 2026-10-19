@@ -25,6 +25,7 @@ import {
   type Transaction,
 } from '@stellar/stellar-sdk';
 import { isCancellationError } from '@/lib/transaction-lifecycle';
+import { networksMatch } from '@/utils/network';
 import { recordPendingTransaction, removePendingTransaction } from '@/lib/pending-transactions';
 import {
   ProposalValidationError,
@@ -46,6 +47,7 @@ export type CreateProposalStage =
   | 'confirmed';
 
 export type CreateProposalErrorCode =
+  | 'NETWORK_MISMATCH'
   | 'SIMULATION_FAILED'
   | 'USER_REJECTED'
   | 'SUBMISSION_FAILED'
@@ -113,6 +115,7 @@ export interface CreateProposalRequest {
   networkPassphrase: string;
   onStage?: (stage: CreateProposalStage) => void;
   pollAttempts?: number;
+  walletNetwork?: string;
 }
 
 export interface CreatedProposal {
@@ -143,7 +146,19 @@ export async function submitCreateProposal({
   networkPassphrase,
   onStage,
   pollAttempts = DEFAULT_POLL_ATTEMPTS,
+  walletNetwork,
 }: CreateProposalRequest): Promise<CreatedProposal> {
+  if (
+    walletNetwork &&
+    !networksMatch(walletNetwork, networkPassphrase.includes('Public') ? 'mainnet' : 'testnet')
+  ) {
+    throw new CreateProposalError(
+      'NETWORK_MISMATCH',
+      'validating',
+      `Network mismatch detected. Configured network differs from wallet network (${walletNetwork}). Transactions cannot be signed.`
+    );
+  }
+
   // ── validating ───────────────────────────────────────────────────────────
   onStage?.('validating');
   const validation = validateProposalPayload(payload, context);

@@ -98,7 +98,7 @@ function describeSubmitError(error: unknown): string {
 
 export default function NewGovernanceProposalPage() {
   const router = useRouter();
-  const { address, isConnected, signTx } = useWallet();
+  const { address, isConnected, signTx, walletNetwork } = useWallet();
   const invalidateGovernanceQueries = useInvalidateGovernanceQueries();
 
   const [formData, setFormData] = useState<FormData>({
@@ -124,6 +124,7 @@ export default function NewGovernanceProposalPage() {
   const [loadingSimulation, setLoadingSimulation] = useState(false);
   const [stage, setStage] = useState<CreateProposalStage | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const isSubmittingRef = useRef(false);
 
   // Incremented by the Retry buttons to re-run the reads below.
   const [paramsAttempt, setParamsAttempt] = useState(0);
@@ -323,13 +324,16 @@ export default function NewGovernanceProposalPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmittingRef.current || submitting) return;
     if (!isConnected || !address || !protocolParams || !payload) return;
     if (!validateForm()) return;
 
+    isSubmittingRef.current = true;
     setSubmitting(true);
     setStage(null);
     try {
       const { proposalId } = await createProposal(payload, address, signTx, {
+        walletNetwork,
         context: toValidationContext(protocolParams),
         onStage: setStage,
         onConfirmed: async () => {
@@ -347,6 +351,7 @@ export default function NewGovernanceProposalPage() {
         setFormErrors({ submit: describeSubmitError(error) });
       }
     } finally {
+      isSubmittingRef.current = false;
       setSubmitting(false);
     }
   };

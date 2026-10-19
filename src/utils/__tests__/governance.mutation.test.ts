@@ -29,13 +29,27 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   castVote,
   createProposal,
+  executeProposal,
   clearGovernanceIdempotencyCache,
   fetchProposal,
   fetchProposals,
   getVotingPower,
   VotingPowerError,
-  MOCK_PROPOSALS,
+  GovernanceNetworkMismatchError,
+  GovernanceReadError,
   vetoProposal,
+  decodeProposalCreatedEvent,
+  decodeProposalExecutedEvent,
+  decodeVoteCastEvent,
+  decodeProposalVetoedEvent,
+  decodeParameterUpdatedEvent,
+  decodeGovernanceEvent,
+  createProposalCreatedFixture,
+  createProposalExecutedFixture,
+  createVoteCastFixture,
+  createProposalVetoedFixture,
+  createParameterUpdatedFixture,
+  EventDecodingError,
   type CreateProposalPayload,
 } from '../governance';
 import {
@@ -453,3 +467,416 @@ describe('governance write-path regression: no mock/random fallback (#1070)', ()
     assertNoRandomFallback(hash1, 'vetoProposal regression');
   });
 });
+
+describe('governance network mismatch protection (#1067)', () => {
+  beforeEach(() => {
+    signTx.mockClear();
+    clearGovernanceIdempotencyCache();
+    establishGovernanceTestSession(SIGNER);
+  });
+
+  it('castVote succeeds when wallet network matches configured network', async () => {
+    const result = await castVote(1, 'For', SIGNER, signTx, { walletNetwork: 'testnet' });
+    expect(signTx).toHaveBeenCalledWith(expect.stringContaining('vote:1:For'));
+    assertNoRandomFallback(result, 'castVote matching network');
+  });
+
+  it('castVote blocks signing and mutation when wallet network differs from configured network', async () => {
+    const proposalBefore = await fetchProposal(1);
+    const votesBefore = proposalBefore?.votesFor ?? 0;
+
+    await expect(
+      castVote(1, 'For', SIGNER, signTx, { walletNetwork: 'mainnet' })
+    ).rejects.toThrow(GovernanceNetworkMismatchError);
+
+    await expect(
+      castVote(1, 'For', SIGNER, signTx, { walletNetwork: 'PUBLIC' })
+    ).rejects.toThrow(/NETWORK_MISMATCH/);
+
+    expect(signTx).not.toHaveBeenCalled();
+    const proposalAfter = await fetchProposal(1);
+    expect(proposalAfter?.votesFor).toBe(votesBefore);
+  });
+
+  it('createProposal succeeds when wallet network matches configured network', async () => {
+    const payload: CreateProposalPayload = {
+      formType: 'FeeRate',
+      title: 'Valid network proposal',
+      description: 'Testing matching network configuration',
+      newValueBps: 25,
+    };
+    establishGovernanceTestSession(PROPOSER);
+    const rpcStub = stubProposalRpc({ proposalId: 88 });
+    try {
+      const res = await createProposal(payload, PROPOSER, passthroughSignTx, {
+        context: PROPOSAL_CONTEXT,
+        walletNetwork: 'testnet',
+      });
+      expect(res.proposalId).toBe(88);
+      expect(res.txHash).toBe(CREATE_TX_HASH);
+      assertNoRandomFallback(res.txHash, 'createProposal matching network');
+      expect(rpcStub.sendTransaction).toHaveBeenCalledTimes(1);
+    } finally {
+      rpcStub.restore();
+    }
+  });
+
+  it('createProposal blocks signing and submission when wallet network differs', async () => {
+    const payload: CreateProposalPayload = {
+      formType: 'FeeRate',
+      title: 'Mismatched network proposal',
+      description: 'Must fail before building or signing',
+      newValueBps: 25,
+    };
+    establishGovernanceTestSession(PROPOSER);
+    const rpcStub = stubProposalRpc();
+    const proposalSign = vi.fn(passthroughSignTx);
+    try {
+      await expect(
+        createProposal(payload, PROPOSER, proposalSign, {
+          context: PROPOSAL_CONTEXT,
+          walletNetwork: 'mainnet',
+        })
+      ).rejects.toThrow(GovernanceNetworkMismatchError);
+
+      expect(proposalSign).not.toHaveBeenCalled();
+      expect(rpcStub.sendTransaction).not.toHaveBeenCalled();
+    } finally {
+      rpcStub.restore();
+    }
+  });
+
+  it('vetoProposal blocks signing and mutation when wallet network differs', async () => {
+    const created = { proposalId: 3 };
+    const proposalBefore = await fetchProposal(created.proposalId);
+    const statusBefore = proposalBefore?.status;
+
+    await expect(
+      vetoProposal(created.proposalId, '0xmismatch_reason', SIGNER, signTx, {
+        walletNetwork: 'mainnet',
+      })
+    ).rejects.toThrow(GovernanceNetworkMismatchError);
+
+    expect(signTx).not.toHaveBeenCalled();
+    const proposalAfter = await fetchProposal(created.proposalId);
+    expect(proposalAfter?.status).toBe(statusBefore);
+  });
+
+  it('executeProposal blocks signing and mutation when wallet network differs', async () => {
+    const proposalId = 4;
+    const proposalBefore = await fetchProposal(proposalId);
+    const statusBefore = proposalBefore?.status;
+
+    await expect(
+      executeProposal(proposalId, SIGNER, signTx, {
+        walletNetwork: 'mainnet',
+      })
+    ).rejects.toThrow(GovernanceNetworkMismatchError);
+
+    expect(signTx).not.toHaveBeenCalled();
+    const proposalAfter = await fetchProposal(proposalId);
+    expect(proposalAfter?.status).toBe(statusBefore);
+  });
+
+  it('regression guard: no mock/random fallback returns on network mismatch attempts', async () => {
+    await expect(
+      castVote(1, 'For', SIGNER, signTx, { walletNetwork: 'PUBLIC' })
+    ).rejects.toThrow();
+    expect(signTx).not.toHaveBeenCalled();
+  });
+});
+
+describe('governance duplicate-submit lock (#1068)', () => {
+  beforeEach(() => {
+    signTx.mockClear();
+    clearGovernanceIdempotencyCache();
+    establishGovernanceTestSession(SIGNER);
+  });
+
+  it('castVote: rapid repeated clicks produce one transaction request and one result', async () => {
+    const proposalBefore = await fetchProposal(6);
+    const votesBefore = proposalBefore?.votesFor ?? 0;
+
+    const [first, second, third] = await Promise.all([
+      castVote(6, 'For', SIGNER, signTx),
+      castVote(6, 'For', SIGNER, signTx),
+      castVote(6, 'For', SIGNER, signTx),
+    ]);
+
+    expect(signTx).toHaveBeenCalledTimes(1);
+    expect(first).toBe(second);
+    expect(second).toBe(third);
+    assertNoRandomFallback(first, 'castVote duplicate lock');
+
+    const proposalAfter = await fetchProposal(6);
+    expect(proposalAfter?.votesFor).toBe(votesBefore + 1250);
+  });
+
+  it('castVote: in-flight lock releases after error so user can retry successfully', async () => {
+    const failingSignTx = vi.fn().mockRejectedValueOnce(new Error('User declined in wallet'));
+    await expect(castVote(6, 'For', SIGNER, failingSignTx)).rejects.toThrow();
+
+    // After failure, lock is released: a subsequent click succeeds and calls signTx
+    const successResult = await castVote(6, 'For', SIGNER, signTx);
+    expect(signTx).toHaveBeenCalledTimes(1);
+    assertNoRandomFallback(successResult, 'castVote retry after failure');
+  });
+
+  it('createProposal: rapid repeated clicks produce one transaction request and one proposal', async () => {
+    const payload: CreateProposalPayload = {
+      formType: 'FeeRate',
+      title: 'Rapid clicks proposal',
+      description: 'Deduplication across concurrent submissions',
+      newValueBps: 45,
+    };
+    establishGovernanceTestSession(PROPOSER);
+    const rpcStub = stubProposalRpc({ proposalId: 99 });
+    const proposalSign = vi.fn(passthroughSignTx);
+    try {
+      const [res1, res2, res3] = await Promise.all([
+        createProposal(payload, PROPOSER, proposalSign, { context: PROPOSAL_CONTEXT }),
+        createProposal(payload, PROPOSER, proposalSign, { context: PROPOSAL_CONTEXT }),
+        createProposal(payload, PROPOSER, proposalSign, { context: PROPOSAL_CONTEXT }),
+      ]);
+
+      expect(proposalSign).toHaveBeenCalledTimes(1);
+      expect(rpcStub.sendTransaction).toHaveBeenCalledTimes(1);
+      expect(res1.txHash).toBe(res2.txHash);
+      expect(res2.txHash).toBe(res3.txHash);
+      expect(res1.proposalId).toBe(99);
+      expect(res2.proposalId).toBe(99);
+      assertNoRandomFallback(res1.txHash, 'createProposal duplicate lock');
+    } finally {
+      rpcStub.restore();
+    }
+  });
+
+  it('vetoProposal: rapid repeated clicks produce one transaction request and one veto record', async () => {
+    const created = { proposalId: 5 };
+    const reason = '0xrapid_veto_reason';
+
+    const [tx1, tx2, tx3] = await Promise.all([
+      vetoProposal(created.proposalId, reason, SIGNER, signTx),
+      vetoProposal(created.proposalId, reason, SIGNER, signTx),
+      vetoProposal(created.proposalId, reason, SIGNER, signTx),
+    ]);
+
+    expect(signTx).toHaveBeenCalledTimes(1);
+    expect(tx1).toBe(tx2);
+    expect(tx2).toBe(tx3);
+    assertNoRandomFallback(tx1, 'vetoProposal duplicate lock');
+
+    const proposalAfter = await fetchProposal(created.proposalId);
+    expect(proposalAfter?.status).toBe('Vetoed');
+    const records = proposalAfter?.vetoHistory?.filter((r) => r.reasonHash === reason) ?? [];
+    expect(records.length).toBe(1);
+  });
+
+  it('executeProposal: rapid repeated clicks produce one transaction request and one result', async () => {
+    const proposalId = 6;
+
+    const [tx1, tx2] = await Promise.all([
+      executeProposal(proposalId, SIGNER, signTx),
+      executeProposal(proposalId, SIGNER, signTx),
+    ]);
+
+    expect(signTx).toHaveBeenCalledTimes(1);
+    expect(tx1).toBe(tx2);
+    assertNoRandomFallback(tx1, 'executeProposal duplicate lock');
+
+    const proposalAfter = await fetchProposal(proposalId);
+    expect(proposalAfter?.status).toBe('Executed');
+  });
+
+  it('regression guard: duplicate submissions never generate random fallbacks or multiple hashes', async () => {
+    const [h1, h2] = await Promise.all([
+      castVote(5, 'Against', SIGNER, signTx),
+      castVote(5, 'Against', SIGNER, signTx),
+    ]);
+    expect(h1).toBe(h2);
+    assertNoRandomFallback(h1, 'regression duplicate clicks');
+    expect(signTx).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('governance contract read fallbacks (#1069)', () => {
+  beforeEach(() => {
+    signTx.mockClear();
+    clearGovernanceIdempotencyCache();
+    establishGovernanceTestSession(SIGNER);
+  });
+
+  it('fetchProposals succeeds when contract returns valid proposal list', async () => {
+    const proposals = await fetchProposals();
+    expect(Array.isArray(proposals)).toBe(true);
+    expect(proposals.length).toBeGreaterThan(0);
+    expect(proposals[0]).toHaveProperty('id');
+    expect(proposals[0]).toHaveProperty('title');
+    expect(proposals[0]).toHaveProperty('status');
+  });
+
+  it('fetchProposals fails closed with GovernanceReadError when RPC returns simulation error', async () => {
+    const mockSimulate = vi
+      .spyOn(rpc.Server.prototype, 'simulateTransaction')
+      .mockResolvedValueOnce({
+        error: 'Simulation failed: host error',
+      } as any);
+
+    await expect(fetchProposals()).rejects.toThrow(GovernanceReadError);
+    await expect(fetchProposals()).rejects.toThrow(/GOVERNANCE_READ_UNAVAILABLE/);
+    mockSimulate.mockRestore();
+  });
+
+  it('fetchProposals fails closed when network transport fails', async () => {
+    const mockSimulate = vi
+      .spyOn(rpc.Server.prototype, 'simulateTransaction')
+      .mockRejectedValueOnce(new Error('500 Internal Server Error: RPC node unreachable'));
+
+    await expect(fetchProposals()).rejects.toThrow(GovernanceReadError);
+    await expect(fetchProposals()).rejects.toThrow(/GOVERNANCE_READ_UNAVAILABLE/);
+    mockSimulate.mockRestore();
+  });
+
+  it('fetchProposal fails closed with GovernanceReadError when RPC fails', async () => {
+    const mockSimulate = vi
+      .spyOn(rpc.Server.prototype, 'simulateTransaction')
+      .mockRejectedValueOnce(new Error('RPC connection refused'));
+
+    await expect(fetchProposal(1)).rejects.toThrow(GovernanceReadError);
+    mockSimulate.mockRestore();
+  });
+
+  it('regression guard: RPC failures produce unavailable error rather than fabricated mock values', async () => {
+    const mockSimulate = vi
+      .spyOn(rpc.Server.prototype, 'simulateTransaction')
+      .mockResolvedValueOnce({
+        error: 'RPC simulation error',
+      } as any);
+
+    // Must NOT return MOCK_PROPOSALS
+    await expect(fetchProposals()).rejects.toThrow(GovernanceReadError);
+    mockSimulate.mockRestore();
+  });
+
+  it('blocks vote mutation when voting power read fails (#1069)', async () => {
+    const mockSimulate = vi
+      .spyOn(rpc.Server.prototype, 'simulateTransaction')
+      .mockImplementation(async (tx: any) => {
+        const op = tx?.operations?.[0];
+        if (op?.function === 'get_voting_power') {
+          return { error: 'Simulation failed' } as any;
+        }
+        return { error: 'offline' } as any;
+      });
+
+    await expect(castVote(1, 'For', SIGNER, signTx)).rejects.toThrow(
+      /VOTING_POWER_UNAVAILABLE/
+    );
+    expect(signTx).not.toHaveBeenCalled();
+    mockSimulate.mockRestore();
+  });
+});
+
+describe('governance event decoding fixtures (#1066)', () => {
+  it('decodes proposal_created deterministic fixture correctly', () => {
+    const fixture = createProposalCreatedFixture(GOVERNANCE_CONTRACT_ID, 101, SIGNER, 'UpdateFeeRate');
+    const decoded = decodeProposalCreatedEvent(fixture);
+
+    expect(decoded).not.toBeNull();
+    expect(decoded?.kind).toBe('proposal_created');
+    expect(decoded?.proposalId).toBe(101);
+    expect(decoded?.proposer).toBe(SIGNER);
+    expect(decoded?.actionType).toBe('UpdateFeeRate');
+    expect(decoded?.title).toBe('Test Proposal Title');
+  });
+
+  it('decodes proposal_executed deterministic fixture correctly', () => {
+    const fixture = createProposalExecutedFixture(GOVERNANCE_CONTRACT_ID, 101, 'UpdateFeeRate', {
+      proposedValue: 30,
+      votesFor: 5000,
+      votesAgainst: 200,
+    });
+    const decoded = decodeProposalExecutedEvent(fixture);
+
+    expect(decoded).not.toBeNull();
+    expect(decoded?.kind).toBe('proposal_executed');
+    expect(decoded?.proposalId).toBe(101);
+    expect(decoded?.proposedValue).toBe(30n);
+    expect(decoded?.votesFor).toBe(5000n);
+    expect(decoded?.votesAgainst).toBe(200n);
+  });
+
+  it('decodes vote_cast deterministic fixture correctly across all choices', () => {
+    for (const choice of ['For', 'Against', 'Abstain'] as const) {
+      const fixture = createVoteCastFixture(GOVERNANCE_CONTRACT_ID, 101, SIGNER, choice, 1250);
+      const decoded = decodeVoteCastEvent(fixture);
+
+      expect(decoded).not.toBeNull();
+      expect(decoded?.kind).toBe('vote_cast');
+      expect(decoded?.proposalId).toBe(101);
+      expect(decoded?.choice).toBe(choice);
+      expect(decoded?.votingPower).toBe(1250n);
+      expect(decoded?.voter).toBe(SIGNER);
+    }
+  });
+
+  it('decodes proposal_vetoed deterministic fixture correctly', () => {
+    const fixture = createProposalVetoedFixture(
+      GOVERNANCE_CONTRACT_ID,
+      101,
+      SIGNER,
+      '0xdeadbeef00000000000000000000000000000000000000000000000000000000'
+    );
+    const decoded = decodeProposalVetoedEvent(fixture);
+
+    expect(decoded).not.toBeNull();
+    expect(decoded?.kind).toBe('proposal_vetoed');
+    expect(decoded?.proposalId).toBe(101);
+    expect(decoded?.admin).toBe(SIGNER);
+    expect(decoded?.reasonHash).toBe('0xdeadbeef00000000000000000000000000000000000000000000000000000000');
+  });
+
+  it('decodes parameter_updated deterministic fixture correctly', () => {
+    const fixture = createParameterUpdatedFixture(
+      GOVERNANCE_CONTRACT_ID,
+      'voting_period',
+      86400,
+      172800,
+      SIGNER
+    );
+    const decoded = decodeParameterUpdatedEvent(fixture);
+
+    expect(decoded).not.toBeNull();
+    expect(decoded?.kind).toBe('parameter_updated');
+    expect(decoded?.parameter).toBe('voting_period');
+    expect(decoded?.oldValue).toBe(86400n);
+    expect(decoded?.newValue).toBe(172800n);
+    expect(decoded?.updatedBy).toBe(SIGNER);
+  });
+
+  it('decodeGovernanceEvent universal router decodes all event types and rejects unknown events', () => {
+    const pCreated = createProposalCreatedFixture(GOVERNANCE_CONTRACT_ID, 1, SIGNER);
+    const pExec = createProposalExecutedFixture(GOVERNANCE_CONTRACT_ID, 1);
+    const vCast = createVoteCastFixture(GOVERNANCE_CONTRACT_ID, 1, SIGNER, 'For');
+    const pVeto = createProposalVetoedFixture(GOVERNANCE_CONTRACT_ID, 1, SIGNER, '0xreason');
+    const paramUp = createParameterUpdatedFixture(GOVERNANCE_CONTRACT_ID, 'p', 1, 2);
+
+    expect(decodeGovernanceEvent(pCreated)?.kind).toBe('proposal_created');
+    expect(decodeGovernanceEvent(pExec)?.kind).toBe('proposal_executed');
+    expect(decodeGovernanceEvent(vCast)?.kind).toBe('vote_cast');
+    expect(decodeGovernanceEvent(pVeto)?.kind).toBe('proposal_vetoed');
+    expect(decodeGovernanceEvent(paramUp)?.kind).toBe('parameter_updated');
+  });
+
+  it('rejects malformed payloads without unhandled exceptions or fabricated fallback data', () => {
+    const malformed = {
+      topic: [nativeToScVal('proposal_created', { type: 'symbol' })],
+      value: nativeToScVal(999),
+    } as any;
+
+    expect(decodeProposalCreatedEvent(malformed)).toBeNull();
+    expect(() => decodeProposalCreatedEvent(malformed, { strict: true })).toThrow(EventDecodingError);
+    expect(() => decodeProposalCreatedEvent(malformed, { strict: true })).toThrow(/MALFORMED_EVENT_PAYLOAD/);
+  });
+});
+
