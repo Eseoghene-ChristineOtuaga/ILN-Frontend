@@ -1,4 +1,4 @@
-import { DailyFundingBucket } from '../components/charts/FundingChart';
+import { type DailyFundingBucket } from '@/lib/indexerClient';
 
 export function transformFundingData(data: DailyFundingBucket[]) {
   return data.map((bucket) => {

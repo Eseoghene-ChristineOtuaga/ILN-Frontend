@@ -34,6 +34,19 @@ export const reputationKeys = {
 };
 
 export const governanceKeys = {
+  /**
+   * Everything governed by a confirmed governance mutation. Invalidate this
+   * prefix only when every governance query must be refreshed.
+   */
+  all: ['governance'] as const,
+  /** All proposals (list + tallies + statuses). */
+  proposals: ['governance', 'proposals'] as const,
+  /** A single proposal by id. */
+  proposal: (id: bigint | string | number | null | undefined) =>
+    ['governance', 'proposal', id?.toString() ?? 'unknown'] as const,
+  /** Voting power for an address (changes when balances / delegation change). */
+  votingPower: (address: string | null | undefined) =>
+    ['governance', 'voting-power', address ?? ''] as const,
   /** Recent `ParameterUpdated` contract events for announcement banners. */
   parameterUpdates: ['parameter-updates'] as const,
 };
@@ -66,6 +79,12 @@ export const QUERY_TIMINGS = {
   stats: { staleTime: 60_000, gcTime: 10 * 60_000 },
   /** Governance parameter updates — slow-moving. */
   parameterUpdates: { staleTime: 5 * 60_000, gcTime: 30 * 60_000 },
+  /** Proposal list — refreshed after every confirmed governance mutation. */
+  governanceProposals: { staleTime: 15_000, gcTime: 5 * 60_000 },
+  /** Single proposal detail — refreshed after confirmed vote/execute/veto. */
+  governanceProposalDetail: { staleTime: 30_000, gcTime: 5 * 60_000 },
+  /** Voting power — refreshed after a confirmed vote/delegation mutation. */
+  governanceVotingPower: { staleTime: 30_000, gcTime: 5 * 60_000 },
   /** Reputation score — steady, updated periodically. */
   reputation: { staleTime: 30_000, gcTime: 5 * 60_000 },
   /** Protocol status — critical for maintenance banner, poll frequently. */

@@ -1,10 +1,7 @@
-export interface MonthlyDefaultBucket {
-  date: string;
-  label: string;
-  defaulted: number;
-  funded: number;
-  defaultRate: number;
-}
+import { type MonthlyDefaultBucket } from '@/lib/indexerClient';
+
+// Re-exported so existing importers keep working after the schemas moved (#1105).
+export type { MonthlyDefaultBucket };
 
 export interface MonthlyDefaultWithMA extends MonthlyDefaultBucket {
   movingAverage: number;

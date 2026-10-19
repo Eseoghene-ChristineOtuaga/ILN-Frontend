@@ -8,8 +8,16 @@ import useAddressBook from '@/hooks/useAddressBook';
 export default function AddressBookPage() {
   const { t } = useTranslation();
   const { addToast } = useToast();
-  const { addressBook, addAddress, updateAddress, deleteAddress, searchAddresses } =
-    useAddressBook();
+  const {
+    addressBook,
+    status,
+    recovery,
+    dismissRecovery,
+    addAddress,
+    updateAddress,
+    deleteAddress,
+    searchAddresses,
+  } = useAddressBook();
 
   const [searchQuery, setSearchQuery] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -90,6 +98,32 @@ export default function AddressBookPage() {
 
   return (
     <div className="space-y-6">
+      {recovery && (
+        <div
+          role="alert"
+          className="flex items-start justify-between gap-3 rounded-xl border border-error/30 bg-error-container/40 p-4 text-sm"
+        >
+          <div>
+            <p className="font-medium">{t('addressBook.recovery.title')}</p>
+            <p className="text-on-surface-variant">{t(`addressBook.recovery.${recovery}`)}</p>
+          </div>
+          <button
+            type="button"
+            onClick={dismissRecovery}
+            className="shrink-0 rounded-lg px-3 py-1 font-medium hover:bg-surface-container-high"
+          >
+            {t('addressBook.recovery.dismiss')}
+          </button>
+        </div>
+      )}
+      {status === 'unavailable' && (
+        <div
+          role="alert"
+          className="rounded-xl border border-error/30 bg-error-container/40 p-4 text-sm"
+        >
+          {t('addressBook.errors.storageUnavailable')}
+        </div>
+      )}
       <div className="border border-surface-dim rounded-xl overflow-hidden">
         <div className="flex items-center justify-between p-4 bg-surface-container-low">
           <h3 className="text-lg font-medium">{t('addressBook.title')}</h3>

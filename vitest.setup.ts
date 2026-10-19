@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, vi } from 'vitest';
 import '@testing-library/jest-dom';
+import type { Usable } from 'react';
 import { configure } from '@testing-library/react';
 import { toHaveNoViolations } from 'jest-axe';
 import { server } from './src/mocks/server';
@@ -130,15 +131,21 @@ Object.defineProperty(global, 'localStorage', { value: localStorageMock });
 
 // Mock react 'use' hook for Next.js params
 vi.mock('react', async () => {
-  const actual = (await vi.importActual('react')) as any;
+  const actual = await vi.importActual<typeof import('react')>('react');
   return {
     ...actual,
-    use: vi.fn((input) => {
-      if (input && typeof input.then === 'function') {
-        if (input._resolvedValue) return input._resolvedValue;
-        return input;
+    use: vi.fn(<T>(input: Usable<T>): T => {
+      if (
+        typeof input === 'object' &&
+        input !== null &&
+        'then' in input &&
+        typeof input.then === 'function'
+      ) {
+        const resolvedValue = '_resolvedValue' in input ? input._resolvedValue : undefined;
+        if (resolvedValue !== undefined) return resolvedValue as T;
+        return input as T;
       }
-      return input;
+      return actual.use(input);
     }),
   };
 });

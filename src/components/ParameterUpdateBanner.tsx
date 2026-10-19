@@ -85,12 +85,16 @@ export default function ParameterUpdateBanner() {
             <p className="text-sm font-bold">
               Protocol update: {update.label} changed to {update.newValue}
             </p>
-            <Link
-              href={`/governance/${update.proposalId}`}
-              className="-my-3.5 mt-1 inline-flex items-center py-3.5 text-xs font-medium underline underline-offset-2 opacity-90 hover:opacity-100"
-            >
-              View governance proposal
-            </Link>
+            {/* Only changes enacted by a proposal link to one; direct governance
+                parameter writes (e.g. quorum updates) have no proposal (#1057). */}
+            {update.proposalId !== null && update.proposalId !== undefined && (
+              <Link
+                href={`/governance/${update.proposalId}`}
+                className="-my-3.5 mt-1 inline-flex items-center py-3.5 text-xs font-medium underline underline-offset-2 opacity-90 hover:opacity-100"
+              >
+                View governance proposal
+              </Link>
+            )}
           </div>
           <button
             type="button"

@@ -6,6 +6,12 @@
  */
 export * from './keys';
 export * from './defaultConfig';
+export * from './governanceInvalidation';
+export {
+  useGovernanceProposal,
+  useGovernanceProposals,
+  useGovernanceVotingPower,
+} from './useGovernance';
 export { useInvoiceCount } from './useInvoiceCount';
 export { useInvoice, useInvoices, useFundInvoice } from './useInvoices';
 export { useParameterUpdates } from './useParameterUpdates';

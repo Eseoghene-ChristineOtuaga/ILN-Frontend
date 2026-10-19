@@ -22,6 +22,8 @@ const ALL_STATUSES: IndexerBoundaryStatus[] = [
   'empty',
   'unauthorized',
   'malformed',
+  'unavailable',
+  'rate-limited',
 ];
 
 describe('IndexerBoundaryState accessibility (#1129)', () => {

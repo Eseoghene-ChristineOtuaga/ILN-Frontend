@@ -57,6 +57,18 @@ const BOUNDARY_CONFIG: Record<IndexerBoundaryStatus, BoundaryConfig> = {
     message: 'The data returned could not be understood.',
     role: 'alert',
   },
+  unavailable: {
+    icon: 'cloud_off',
+    title: 'Service unavailable',
+    message: 'The indexer is temporarily unreachable. Direct contract reads are unaffected.',
+    role: 'alert',
+  },
+  'rate-limited': {
+    icon: 'speed',
+    title: 'Too many requests',
+    message: 'Request rate limit reached. Please wait a moment before retrying.',
+    role: 'alert',
+  },
 };
 
 export function IndexerBoundaryState({ status, detail, onRetry }: IndexerBoundaryStateProps) {

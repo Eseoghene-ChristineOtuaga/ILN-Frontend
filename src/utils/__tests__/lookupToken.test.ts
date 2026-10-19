@@ -40,19 +40,32 @@ describe('lookupToken (unit & simulation tests)', () => {
     );
   });
 
-  it('throws an error if the token is already accepted in protocol params', async () => {
-    // USDC is already in MOCK_PROTOCOL_PARAMS
+  it('throws an error if the token is already accepted by the invoice contract', async () => {
     const usdcAddress = 'CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75';
-    await expect(lookupToken(usdcAddress)).rejects.toThrow('USDC is already an accepted token.');
+    const accepted = [{ address: usdcAddress, name: 'USD Coin', symbol: 'USDC', decimals: 7 }];
+    await expect(lookupToken(usdcAddress, accepted)).rejects.toThrow(
+      'USDC is already an accepted token.'
+    );
   });
 
-  it('resolves real on-chain token name and symbol when simulation succeeds', async () => {
+  it('rejects account (G…) addresses, which cannot be accepted tokens', async () => {
+    await expect(
+      lookupToken('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF', [])
+    ).rejects.toThrow('Only Soroban token contracts');
+  });
+
+  it('resolves real on-chain token name, symbol and decimals when simulation succeeds', async () => {
     let callCount = 0;
     const spy = vi
       .spyOn(rpc.Server.prototype, 'simulateTransaction')
       .mockImplementation(async () => {
         callCount++;
-        const strVal = callCount === 1 ? 'Mock Wrapped Bitcoin' : 'mwBTC';
+        const retval =
+          callCount === 1
+            ? xdr.ScVal.scvString('Mock Wrapped Bitcoin')
+            : callCount === 2
+              ? xdr.ScVal.scvString('mwBTC')
+              : xdr.ScVal.scvU32(8);
         return {
           id: `sim-${callCount}`,
           latestLedger: 100,
@@ -60,19 +73,20 @@ describe('lookupToken (unit & simulation tests)', () => {
           result: {
             auth: [],
             xdr: '',
-            retval: xdr.ScVal.scvString(strVal),
+            retval,
           },
         } as unknown as rpc.Api.SimulateTransactionResponse;
       });
 
     try {
-      const token = await lookupToken(TEST_TOKEN_ADDRESS);
+      const token = await lookupToken(TEST_TOKEN_ADDRESS, []);
       expect(token).toEqual({
         address: TEST_TOKEN_ADDRESS,
         name: 'Mock Wrapped Bitcoin',
         symbol: 'mwBTC',
+        decimals: 8,
       });
-      expect(spy).toHaveBeenCalledTimes(2);
+      expect(spy).toHaveBeenCalledTimes(3);
     } finally {
       spy.mockRestore();
     }
@@ -86,7 +100,7 @@ describe('lookupToken (unit & simulation tests)', () => {
     } as unknown as rpc.Api.SimulateTransactionResponse);
 
     try {
-      await expect(lookupToken(TEST_TOKEN_ADDRESS)).rejects.toThrow(
+      await expect(lookupToken(TEST_TOKEN_ADDRESS, [])).rejects.toThrow(
         'HostError: Error(Storage, MissingValue)'
       );
     } finally {
@@ -102,7 +116,7 @@ describe('lookupToken (unit & simulation tests)', () => {
     } as unknown as rpc.Api.SimulateTransactionResponse);
 
     try {
-      await expect(lookupToken(TEST_TOKEN_ADDRESS)).rejects.toThrow('FeeOnTransferToken');
+      await expect(lookupToken(TEST_TOKEN_ADDRESS, [])).rejects.toThrow('FeeOnTransferToken');
     } finally {
       spy.mockRestore();
     }
@@ -121,7 +135,7 @@ describe('lookupToken (unit & simulation tests)', () => {
     } as unknown as rpc.Api.SimulateTransactionResponse);
 
     try {
-      await expect(lookupToken(TEST_TOKEN_ADDRESS)).rejects.toThrow(
+      await expect(lookupToken(TEST_TOKEN_ADDRESS, [])).rejects.toThrow(
         `Failed to simulate token name for ${TEST_TOKEN_ADDRESS}`
       );
     } finally {
@@ -137,7 +151,7 @@ describe('lookupToken (live testnet integration read)', () => {
 
   it('successfully reads live testnet token metadata without mock fallback', async () => {
     try {
-      const token = await lookupToken(LIVE_TESTNET_NATIVE_TOKEN);
+      const token = await lookupToken(LIVE_TESTNET_NATIVE_TOKEN, []);
       expect(token.address).toBe(LIVE_TESTNET_NATIVE_TOKEN);
       expect(typeof token.name).toBe('string');
       expect(typeof token.symbol).toBe('string');
@@ -150,7 +164,7 @@ describe('lookupToken (live testnet integration read)', () => {
 
   it('successfully reads live testnet USDC token metadata', async () => {
     try {
-      const token = await lookupToken(LIVE_TESTNET_USDC_TOKEN);
+      const token = await lookupToken(LIVE_TESTNET_USDC_TOKEN, []);
       expect(token.address).toBe(LIVE_TESTNET_USDC_TOKEN);
       expect(token.symbol).toBe('USDC');
     } catch (err: any) {

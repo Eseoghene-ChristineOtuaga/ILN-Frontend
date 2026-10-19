@@ -1,5 +1,7 @@
 import { http, HttpResponse } from 'msw';
 import { contractReadFixtures } from './fixtures/contract';
+import { freshnessFixtures, proxySuccessEnvelope } from './fixtures/indexer';
+import type { IndexerResourceName } from '@/lib/indexer/types';
 
 const horizonAccount = {
   id: 'GTESTACCOUNT',
@@ -16,6 +18,11 @@ const horizonAccount = {
     },
   ],
 };
+
+function indexerEnvelope(resource: IndexerResourceName, data: unknown[]) {
+  // Mocked dev data has no real indexer behind it, so freshness is reported as unknown.
+  return proxySuccessEnvelope(resource, data, { freshness: freshnessFixtures.unknown });
+}
 
 function stellarRpcResponse(method: string) {
   if (method === 'getHealth') {
@@ -55,8 +62,25 @@ function stellarRpcResponse(method: string) {
 }
 
 export const handlers = [
+  // Legacy leaderboard API; backed by the same server-side indexer client.
   http.get('/api/leaderboard', () => {
     return HttpResponse.json([]);
+  }),
+
+  http.get('/api/indexer/leaderboard', () => {
+    return HttpResponse.json(indexerEnvelope('leaderboard', []));
+  }),
+
+  http.get('/api/indexer/analytics/defaults', () => {
+    return HttpResponse.json(indexerEnvelope('analytics.defaults', []));
+  }),
+
+  http.get('/api/indexer/analytics/funding', () => {
+    return HttpResponse.json(indexerEnvelope('analytics.funding', []));
+  }),
+
+  http.get('/api/indexer/invoices/:invoiceId/events', () => {
+    return HttpResponse.json(indexerEnvelope('invoice.events', []));
   }),
 
   http.get('/api/notifications/:address', () => {
@@ -111,14 +135,5 @@ export const handlers = [
       id: body.id ?? 1,
       result: stellarRpcResponse(method),
     });
-  }),
-
-  // ActivityFeed fetches this on mount (defaults to https://api.iln.example.com
-  // when NEXT_PUBLIC_INDEXER_API_URL is unset). Without a handler the request
-  // escapes to a real network call that resolves after the test's jsdom
-  // environment has already been torn down, crashing with "window is not
-  // defined" from the resulting setState call.
-  http.get('https://api.iln.example.com/invoice/:invoiceId/events', () => {
-    return HttpResponse.json([]);
   }),
 ];

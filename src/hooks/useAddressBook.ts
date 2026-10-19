@@ -1,8 +1,11 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { useWallet } from '@/context/WalletContext';
 import { isValidStellarAddress } from '@/utils/governance';
-import { clearWalletStorage, WALLET_DISCONNECT_STORAGE_KEY } from '@/utils/walletStorage';
-import { encryptValue, decryptValue } from '@/utils/walletCrypto';
+import {
+  deriveKeyFromWalletAddress,
+  encryptForStorage,
+  decryptFromStorage,
+} from '@/utils/addressBookCrypto';
 
 export interface AddressBookEntry {
   id: string;
@@ -20,7 +23,7 @@ export type AddressBookError =
   | 'DUPLICATE_ADDRESS'
   | 'MISSING_FIELDS'
   | 'PERSIST_FAILED'
-  | 'CRYPTO_FAILED';
+  | 'DECRYPT_FAILED';
 
 /** Discriminated result from operations that can fail. */
 export type AddressBookResult = { ok: true } | { ok: false; error: AddressBookError };
@@ -38,16 +41,18 @@ function createEntryId(): string {
 }
 
 /**
- * Attempt to persist the (encrypted) address book to localStorage.
- * Returns true on success, false if the write throws or encryption fails.
+ * Attempt to encrypt and persist the address book to localStorage.
+ * Returns true on success, false if the write throws (e.g. storage full,
+ * private-browsing quota, crypto failure, or a test-injected failure).
  */
-async function tryPersist(key: string, entries: AddressBookEntry[]): Promise<boolean> {
+async function tryPersistEncrypted(
+  key: CryptoKey,
+  storageKey: string,
+  entries: AddressBookEntry[]
+): Promise<boolean> {
   try {
-    const serializable = entries.map((entry) => ({
-      ...entry,
-      address: await encryptValue(entry.address),
-    }));
-    localStorage.setItem(key, JSON.stringify(serializable));
+    const encrypted = await encryptForStorage(key, entries);
+    localStorage.setItem(storageKey, encrypted);
     return true;
   } catch (e) {
     console.error('Failed to persist address book to localStorage', e);
@@ -98,44 +103,98 @@ async function loadPersisted(key: string): Promise<AddressBookEntry[]> {
 export default function useAddressBook() {
   const { address: walletAddress } = useWallet();
   const [addressBook, setAddressBook] = useState<AddressBookEntry[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [loadError, setLoadError] = useState<AddressBookError | null>(null);
+
+  // Cache the derived CryptoKey for the current wallet so we don't re-derive
+  // on every mutation.
+  const cryptoKeyRef = useRef<CryptoKey | null>(null);
+  const currentWalletRef = useRef<string | null>(null);
+
   // Skips the save that runs immediately after a (re)load, so the freshly
   // mounted empty state never overwrites what is already in localStorage.
   const skipNextSaveRef = useRef(true);
   // Whether the user has opted out of persisting the address book (#1099).
   const [persistEnabled, setPersistEnabled] = useState<boolean>(true);
 
+  // ── Load (with decryption) ─────────────────────────────────────────────────
+
   useEffect(() => {
     skipNextSaveRef.current = true;
 
     if (!walletAddress) {
       setAddressBook([]);
+      cryptoKeyRef.current = null;
+      currentWalletRef.current = null;
+      setLoadError(null);
       return;
     }
-    void loadPersisted(`${STORAGE_KEY_PREFIX}${walletAddress}`).then((entries) => {
-      setAddressBook(entries);
-    });
 
-    // Respect the persisted opt-out flag on mount (#1099).
-    const optOut = localStorage.getItem(PERSIST_OPT_OUT_KEY);
-    setPersistEnabled(optOut !== 'true');
-  }, [walletAddress]);
+    let cancelled = false;
 
-  /**
-   * Cross-tab disconnect privacy (#1098).
-   * When another tab clears its wallet session it broadcasts a storage event
-   * on WALLET_DISCONNECT_STORAGE_KEY. This tab must not retain or display the
-   * previous session's address-book data after logout.
-   */
-  useEffect(() => {
-    const handleDisconnectBroadcast = (event: StorageEvent) => {
-      if (event.key === WALLET_DISCONNECT_STORAGE_KEY) {
-        setAddressBook([]);
-        clearWalletStorage();
+    async function loadAndDecrypt() {
+      setIsLoading(true);
+      setLoadError(null);
+
+      try {
+        // Derive (or reuse) the CryptoKey for this wallet address.
+        if (currentWalletRef.current !== walletAddress) {
+          cryptoKeyRef.current = await deriveKeyFromWalletAddress(walletAddress!);
+          currentWalletRef.current = walletAddress!;
+        }
+
+        const key = cryptoKeyRef.current!;
+        const storageKey = `${STORAGE_KEY_PREFIX}${walletAddress}`;
+        const stored = localStorage.getItem(storageKey);
+
+        if (!stored) {
+          if (!cancelled) setAddressBook([]);
+          return;
+        }
+
+        // Attempt decryption.
+        const decrypted = await decryptFromStorage<AddressBookEntry[]>(key, stored);
+
+        if (cancelled) return;
+
+        if (decrypted === null) {
+          // The stored value is not a valid encrypted payload.
+          // This covers the legacy plaintext migration path:
+          // attempt to read it as raw JSON for a one-time migration.
+          try {
+            const legacy = JSON.parse(stored) as AddressBookEntry[];
+            if (Array.isArray(legacy)) {
+              // Re-encrypt and persist the migrated data transparently.
+              await tryPersistEncrypted(key, storageKey, legacy);
+              setAddressBook(legacy);
+              return;
+            }
+          } catch {
+            // Not parseable as JSON either — treat as corrupt.
+          }
+          console.error('Address book data is corrupt or encrypted with a different key');
+          setLoadError('DECRYPT_FAILED');
+          setAddressBook([]);
+        } else {
+          setAddressBook(decrypted);
+        }
+      } catch (e) {
+        if (!cancelled) {
+          console.error('Failed to load address book', e);
+          setLoadError('DECRYPT_FAILED');
+          setAddressBook([]);
+        }
+      } finally {
+        if (!cancelled) setIsLoading(false);
       }
+    }
+
+    loadAndDecrypt();
+
+    return () => {
+      cancelled = true;
     };
-    window.addEventListener('storage', handleDisconnectBroadcast);
-    return () => window.removeEventListener('storage', handleDisconnectBroadcast);
-  }, []);
+  }, [walletAddress]);
 
   useEffect(() => {
     if (skipNextSaveRef.current) {
@@ -145,6 +204,23 @@ export default function useAddressBook() {
     // Persistence is handled explicitly by addAddress / updateAddress / deleteAddress
     // so that callers receive a failure signal when the write fails.
   }, [addressBook, walletAddress]);
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+
+  /**
+   * Obtain the current CryptoKey, deriving it on demand if not yet available.
+   * Returns null when there is no connected wallet.
+   */
+  async function getKey(): Promise<CryptoKey | null> {
+    if (!walletAddress) return null;
+    if (currentWalletRef.current !== walletAddress || !cryptoKeyRef.current) {
+      cryptoKeyRef.current = await deriveKeyFromWalletAddress(walletAddress);
+      currentWalletRef.current = walletAddress;
+    }
+    return cryptoKeyRef.current;
+  }
+
+  // ── addAddress ─────────────────────────────────────────────────────────────
 
   /**
    * Explicitly clear the remembered address-book data (#1099).
@@ -204,16 +280,21 @@ export default function useAddressBook() {
       const next =
         addressBook.length >= 50 ? [...addressBook.slice(1), newEntry] : [...addressBook, newEntry];
 
-      const storageKey = `${STORAGE_KEY_PREFIX}${walletAddress}`;
-      if (walletAddress && persistEnabled && !(await tryPersist(storageKey, next))) {
-        return { ok: false, error: 'PERSIST_FAILED' };
+      if (walletAddress) {
+        const key = await getKey();
+        if (!key) return { ok: false, error: 'PERSIST_FAILED' };
+        const persisted = await tryPersistEncrypted(key, `${STORAGE_KEY_PREFIX}${walletAddress}`, next);
+        if (!persisted) return { ok: false, error: 'PERSIST_FAILED' };
       }
 
       setAddressBook(next);
       return { ok: true };
     },
-    [addressBook, walletAddress, persistEnabled]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [addressBook, walletAddress]
   );
+
+  // ── updateAddress ──────────────────────────────────────────────────────────
 
   /**
    * Update an existing entry by id.
@@ -221,10 +302,7 @@ export default function useAddressBook() {
    * Rolls back state on persistence failure.
    */
   const updateAddress = useCallback(
-    async (
-      id: string,
-      updates: Partial<Omit<AddressBookEntry, 'id'>>
-    ): Promise<AddressBookResult> => {
+    async (id: string, updates: Partial<Omit<AddressBookEntry, 'id'>>): Promise<AddressBookResult> => {
       if (updates.address !== undefined) {
         if (!isValidStellarAddress(updates.address)) {
           return { ok: false, error: 'INVALID_ADDRESS' };
@@ -237,31 +315,41 @@ export default function useAddressBook() {
 
       const next = addressBook.map((entry) => (entry.id === id ? { ...entry, ...updates } : entry));
 
-      const storageKey = `${STORAGE_KEY_PREFIX}${walletAddress}`;
-      if (walletAddress && persistEnabled && !(await tryPersist(storageKey, next))) {
-        // Do NOT update React state — UI stays consistent with what is on disk.
-        return { ok: false, error: 'PERSIST_FAILED' };
+      if (walletAddress) {
+        const key = await getKey();
+        if (!key) return { ok: false, error: 'PERSIST_FAILED' };
+        const persisted = await tryPersistEncrypted(key, `${STORAGE_KEY_PREFIX}${walletAddress}`, next);
+        if (!persisted) {
+          // Do NOT update React state — UI stays consistent with what is on disk.
+          return { ok: false, error: 'PERSIST_FAILED' };
+        }
       }
 
       setAddressBook(next);
       return { ok: true };
     },
-    [addressBook, walletAddress, persistEnabled]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [addressBook, walletAddress]
   );
 
+  // ── deleteAddress ──────────────────────────────────────────────────────────
+
   const deleteAddress = useCallback(
-    async (id: string): Promise<AddressBookResult> => {
-      setAddressBook((prev) => {
-        const next = prev.filter((entry) => entry.id !== id);
-        if (walletAddress && persistEnabled) {
-          void tryPersist(`${STORAGE_KEY_PREFIX}${walletAddress}`, next);
+    async (id: string): Promise<void> => {
+      const next = addressBook.filter((entry) => entry.id !== id);
+      if (walletAddress) {
+        const key = await getKey();
+        if (key) {
+          await tryPersistEncrypted(key, `${STORAGE_KEY_PREFIX}${walletAddress}`, next);
         }
-        return next;
-      });
-      return { ok: true };
+      }
+      setAddressBook(next);
     },
-    [walletAddress, persistEnabled]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [addressBook, walletAddress]
   );
+
+  // ── searchAddresses ────────────────────────────────────────────────────────
 
   const searchAddresses = useCallback(
     (query: string) => {
@@ -278,6 +366,8 @@ export default function useAddressBook() {
 
   return {
     addressBook,
+    isLoading,
+    loadError,
     addAddress,
     updateAddress,
     deleteAddress,

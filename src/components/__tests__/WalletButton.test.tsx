@@ -42,6 +42,15 @@ const walletState = {
   disconnect: vi.fn(),
   switchNetwork: vi.fn(),
   signTx: vi.fn(),
+  authenticate: vi.fn().mockResolvedValue(undefined),
+  authStatus: 'idle' as 'idle' | 'authenticating' | 'authenticated' | 'error' | 'expired',
+  authError: null as Error | null,
+  authDiagnostics: {
+    domain: null as string | null,
+    network: 'TESTNET',
+    expiresAt: null as number | null,
+    serverHealth: 'unknown' as 'unknown' | 'available' | 'unavailable',
+  },
 };
 
 vi.mock('../../context/WalletContext', () => ({
@@ -103,6 +112,15 @@ describe('WalletButton', () => {
     walletState.connect.mockReset();
     walletState.disconnect.mockReset();
     walletState.signTx.mockReset();
+    walletState.authenticate.mockReset().mockResolvedValue(undefined);
+    walletState.authStatus = 'idle';
+    walletState.authError = null;
+    walletState.authDiagnostics = {
+      domain: null,
+      network: 'TESTNET',
+      expiresAt: null,
+      serverHealth: 'unknown',
+    };
   });
 
   // ── State 1: Disconnected ─────────────────────────────────────────────────
@@ -209,6 +227,19 @@ describe('WalletButton', () => {
       render(<WalletButton />);
       fireEvent.click(screen.getByRole('button', { name: new RegExp(SHORT_ADDRESS) }));
       expect(screen.getByRole('button', { name: /disconnect/i })).toBeInTheDocument();
+    });
+
+    it('exposes authentication readiness and starts SEP-10 authentication', async () => {
+      walletState.authDiagnostics.domain = 'example.com';
+      walletState.authDiagnostics.serverHealth = 'available';
+      render(<WalletButton />);
+      fireEvent.click(screen.getByRole('button', { name: new RegExp(SHORT_ADDRESS) }));
+
+      expect(screen.getByRole('region', { name: 'Authentication readiness' })).toBeInTheDocument();
+      expect(screen.getByText('example.com')).toBeInTheDocument();
+      expect(screen.getByText('Available')).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: /authenticate wallet/i }));
+      await waitFor(() => expect(walletState.authenticate).toHaveBeenCalledOnce());
     });
 
     it('calls disconnect() when the Disconnect button is clicked', () => {

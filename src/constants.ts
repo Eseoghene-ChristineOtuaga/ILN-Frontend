@@ -10,6 +10,7 @@ export const NETWORK_PASSPHRASE =
 export const RPC_URL = process.env.NEXT_PUBLIC_RPC_URL || 'https://soroban-testnet.stellar.org';
 export const NETWORK_NAME = process.env.NEXT_PUBLIC_NETWORK_NAME || 'TESTNET';
 export const STELLAR_NETWORK = process.env.NEXT_PUBLIC_STELLAR_NETWORK || 'testnet';
+export const SEP10_HOME_DOMAIN = process.env.NEXT_PUBLIC_SEP10_HOME_DOMAIN || '';
 export const TESTNET_USDC_TOKEN_ID =
   process.env.NEXT_PUBLIC_TESTNET_USDC_TOKEN_ID ||
   'CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75';
@@ -59,23 +60,32 @@ export const INDEXER_WS_URL = process.env.NEXT_PUBLIC_INDEXER_WS_URL || 'ws://lo
 
 // ─── Indexer API Configuration ──────────────────────────────────────────────
 
+// The indexer REST URL and credential are server-only (read by
+// src/lib/indexer/server.ts). Browser code reaches the indexer through the
+// /api/indexer proxy, so they are deliberately not exported from this module.
+
 /**
- * Public indexer API URL (exposed to browser, no auth required)
+ * Default timeout for indexer requests in milliseconds (#1107).
+ */
+export const INDEXER_DEFAULT_TIMEOUT_MS = 10_000;
+
+/**
+ * Maximum retry attempts for transient indexer failures (#1108).
  */
 export const INDEXER_API_URL =
   process.env.NEXT_PUBLIC_INDEXER_API_URL || 'https://api.iln.example.com';
+export const INDEXER_DEFAULT_RETRIES = 2;
 
 /**
- * Server-side indexer URL with optional authentication.
- * Used for leaderboard, analytics, and higher-volume server calls.
+ * Base backoff in milliseconds for exponential retry (#1108).
  */
 export const INDEXER_SERVER_URL =
   process.env.INDEXER_URL ||
   process.env.NEXT_PUBLIC_INDEXER_API_URL ||
   'https://api.iln.example.com';
+export const INDEXER_DEFAULT_BACKOFF_MS = 300;
 
 /**
- * Server-side API key for authenticated indexer calls (never expose to client).
- * When set, enables higher rate limits vs. anonymous requests.
+ * Maximum backoff cap in milliseconds for exponential retry (#1108).
  */
-export const INDEXER_API_KEY = process.env.INDEXER_API_KEY || '';
+export const INDEXER_MAX_BACKOFF_MS = 2_000;

@@ -29,7 +29,11 @@ export function setStoredWalletProvider(
   storage.setItem(WALLET_PROVIDER_STORAGE_KEY, provider);
 }
 
-/** Prefixes/keys considered user-session data, removed on disconnect. */
+/**
+ * Prefixes/keys considered user-session data, removed on disconnect.
+ * `iln-address-book-` covers both the legacy `<prefix><wallet>` key and the
+ * origin/network-scoped `<prefix>v1-<tag>-<wallet>` key (walletRecordStore.ts).
+ */
 export const WALLET_SCOPED_PREFIXES = [
   'iln-address-book-',
   'iln-watchlist',

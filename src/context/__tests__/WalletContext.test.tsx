@@ -23,6 +23,7 @@ import { WalletProvider, useWallet } from '../WalletContext';
 import { WALLET_ADDRESS_STORAGE_KEY, WALLET_PROVIDER_STORAGE_KEY } from '@/utils/walletStorage';
 import { getWalletRoles } from '@/utils/soroban';
 import { trackEvent } from '@/lib/analytics';
+import { authenticateWithSep10, Sep10Error } from '@/utils/sep10';
 
 // ─── Module mocks ─────────────────────────────────────────────────────────────
 
@@ -57,6 +58,23 @@ vi.mock('@/lib/analytics', () => ({
   trackEvent: vi.fn(),
 }));
 
+const sep10Mocks = vi.hoisted(() => ({
+  authenticateWithSep10: vi.fn(),
+  authenticatedFetch: vi.fn(),
+}));
+
+vi.mock('@/utils/sep10', () => ({
+  ...sep10Mocks,
+  Sep10Error: class Sep10Error extends Error {
+    code: string;
+
+    constructor(code: string, message: string) {
+      super(message);
+      this.code = code;
+    }
+  },
+}));
+
 // The real modal pulls in QR code rendering + a focus trap; a light stub lets
 // tests drive `connect()`'s provider-selection step deterministically.
 vi.mock('@/components/WalletSelectionModal', () => ({
@@ -85,6 +103,7 @@ const ADDRESS = 'GCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC6';
 function TestConsumer() {
   const wallet = useWallet();
   const [signResult, setSignResult] = useState<string>('none');
+  const [requestResult, setRequestResult] = useState<string>('none');
 
   return (
     <div>
@@ -100,10 +119,34 @@ function TestConsumer() {
       <div data-testid="switchingNetwork">{String(wallet.switchingNetwork)}</div>
       <div data-testid="roles">{wallet.roles.join(',') || 'none'}</div>
       <div data-testid="rolesLoading">{String(wallet.rolesLoading)}</div>
+      <div data-testid="authStatus">{wallet.authStatus}</div>
+      <div data-testid="authError">{wallet.authError?.message ?? 'none'}</div>
+      <div data-testid="requestResult">{requestResult}</div>
       <div data-testid="signResult">{signResult}</div>
       <button onClick={() => void wallet.connect()}>connect</button>
       <button onClick={() => wallet.disconnect()}>disconnect</button>
       <button onClick={() => void wallet.switchNetwork()}>switchNetwork</button>
+      <button
+        onClick={() => {
+          void wallet.authenticate().catch(() => {});
+        }}
+      >
+        authenticate
+      </button>
+      <button
+        onClick={() => {
+          void wallet
+            .authenticatedRequest('https://api.example.com/private')
+            .then(() => setRequestResult('success'))
+            .catch((requestError: unknown) => {
+              setRequestResult(
+                requestError instanceof Error ? requestError.message : 'unexpected failure'
+              );
+            });
+        }}
+      >
+        authenticatedRequest
+      </button>
       <button
         onClick={async () => {
           try {
@@ -143,6 +186,7 @@ const mockedGetNetwork = vi.mocked(getNetwork);
 const mockedRequestAccess = vi.mocked(requestAccess);
 const mockedGetWalletRoles = vi.mocked(getWalletRoles);
 const mockedTrackEvent = vi.mocked(trackEvent);
+const mockedAuthenticateWithSep10 = vi.mocked(authenticateWithSep10);
 
 beforeEach(() => {
   localStorage.clear();
@@ -155,6 +199,18 @@ beforeEach(() => {
   mockedGetNetwork.mockResolvedValue({ network: 'TESTNET', networkPassphrase: '' } as any);
   mockedRequestAccess.mockResolvedValue({ address: '' } as any);
   mockedGetWalletRoles.mockResolvedValue([]);
+  mockedAuthenticateWithSep10.mockImplementation(async (options) => {
+    await options.assertWalletIdentity();
+    return {
+      token: 'valid.jwt.token',
+      address: options.address,
+      domain: 'example.com',
+      authOrigin: 'https://auth.example.com',
+      network: options.network,
+      expiresAt: Date.now() + 60_000,
+    };
+  });
+  sep10Mocks.authenticatedFetch.mockReset();
   addToastMock.mockClear();
   updateToastMock.mockClear();
   pushMock.mockClear();
@@ -630,6 +686,126 @@ describe('signTx()', () => {
         'ERROR:Freighter did not return a signed transaction.'
       )
     );
+  });
+});
+
+describe('authenticate()', () => {
+  it('authenticates the currently connected Freighter identity', async () => {
+    mockedIsConnected.mockResolvedValue({ isConnected: true });
+    mockedSetAllowed.mockResolvedValue({ isAllowed: true });
+    mockedGetAddress.mockResolvedValue({ address: ADDRESS } as any);
+    mockedGetNetwork.mockResolvedValue({ network: 'TESTNET' } as any);
+    renderWallet();
+    await connectViaFreighter();
+    await waitFor(() => expect(screen.getByTestId('address').textContent).toBe(ADDRESS));
+
+    fireEvent.click(screen.getByRole('button', { name: 'authenticate' }));
+
+    await waitFor(() => expect(screen.getByTestId('authStatus').textContent).toBe('authenticated'));
+    expect(mockedAuthenticateWithSep10).toHaveBeenCalledWith(
+      expect.objectContaining({ address: ADDRESS, network: 'TESTNET' })
+    );
+  });
+
+  it('clears the SEP-10 session when the wallet disconnects', async () => {
+    mockedIsConnected.mockResolvedValue({ isConnected: true });
+    mockedSetAllowed.mockResolvedValue({ isAllowed: true });
+    mockedGetAddress.mockResolvedValue({ address: ADDRESS } as any);
+    mockedGetNetwork.mockResolvedValue({ network: 'TESTNET' } as any);
+    renderWallet();
+    await connectViaFreighter();
+    await waitFor(() => expect(screen.getByTestId('address').textContent).toBe(ADDRESS));
+    fireEvent.click(screen.getByRole('button', { name: 'authenticate' }));
+    await waitFor(() => expect(screen.getByTestId('authStatus').textContent).toBe('authenticated'));
+
+    fireEvent.click(screen.getByRole('button', { name: 'disconnect' }));
+
+    expect(screen.getByTestId('authStatus').textContent).toBe('idle');
+    expect(screen.getByTestId('authError').textContent).toBe('none');
+  });
+
+  it.each([
+    [401, 'HTTP_UNAUTHORIZED', 'expired'],
+    [403, 'HTTP_FORBIDDEN', 'authenticated'],
+  ] as const)(
+    'keeps backend HTTP %i distinct and recoverable',
+    async (status, code, expectedStatus) => {
+      mockedIsConnected.mockResolvedValue({ isConnected: true });
+      mockedSetAllowed.mockResolvedValue({ isAllowed: true });
+      mockedGetAddress.mockResolvedValue({ address: ADDRESS } as any);
+      mockedGetNetwork.mockResolvedValue({ network: 'TESTNET' } as any);
+      sep10Mocks.authenticatedFetch.mockRejectedValue(
+        new Sep10Error(
+          code,
+          status === 401 ? 'Backend authentication expired.' : 'Backend access is forbidden.'
+        )
+      );
+      renderWallet();
+      await connectViaFreighter();
+      await waitFor(() => expect(screen.getByTestId('address').textContent).toBe(ADDRESS));
+      fireEvent.click(screen.getByRole('button', { name: 'authenticate' }));
+      await waitFor(() =>
+        expect(screen.getByTestId('authStatus').textContent).toBe('authenticated')
+      );
+
+      fireEvent.click(screen.getByRole('button', { name: 'authenticatedRequest' }));
+
+      await waitFor(() =>
+        expect(screen.getByTestId('requestResult').textContent).toBe(
+          status === 401 ? 'Backend authentication expired.' : 'Backend access is forbidden.'
+        )
+      );
+      expect(screen.getByTestId('authStatus').textContent).toBe(expectedStatus);
+      expect(screen.getByTestId('authError').textContent).toBe(
+        status === 401 ? 'Backend authentication expired.' : 'Backend access is forbidden.'
+      );
+    }
+  );
+
+  it('expires the in-memory SEP-10 session when its token expires', async () => {
+    mockedIsConnected.mockResolvedValue({ isConnected: true });
+    mockedSetAllowed.mockResolvedValue({ isAllowed: true });
+    mockedGetAddress.mockResolvedValue({ address: ADDRESS } as any);
+    mockedGetNetwork.mockResolvedValue({ network: 'TESTNET' } as any);
+    mockedAuthenticateWithSep10.mockImplementation(async (options) => {
+      await options.assertWalletIdentity();
+      return {
+        token: 'valid.jwt.token',
+        address: options.address,
+        domain: 'example.com',
+        authOrigin: 'https://auth.example.com',
+        network: options.network,
+        expiresAt: Date.now() + 50,
+      };
+    });
+    renderWallet();
+    await connectViaFreighter();
+    await waitFor(() => expect(screen.getByTestId('address').textContent).toBe(ADDRESS));
+    fireEvent.click(screen.getByRole('button', { name: 'authenticate' }));
+    await waitFor(() => expect(screen.getByTestId('authStatus').textContent).toBe('authenticated'));
+
+    await waitFor(() => expect(screen.getByTestId('authStatus').textContent).toBe('expired'), {
+      timeout: 1_000,
+    });
+    expect(screen.getByTestId('authError').textContent).toMatch(/session expired/i);
+  });
+
+  it('rejects authentication if the active wallet account changes', async () => {
+    mockedIsConnected.mockResolvedValue({ isConnected: true });
+    mockedSetAllowed.mockResolvedValue({ isAllowed: true });
+    mockedGetAddress.mockResolvedValue({ address: ADDRESS } as any);
+    mockedGetNetwork.mockResolvedValue({ network: 'TESTNET' } as any);
+    renderWallet();
+    await connectViaFreighter();
+    await waitFor(() => expect(screen.getByTestId('address').textContent).toBe(ADDRESS));
+    mockedGetAddress.mockResolvedValue({
+      address: 'GDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD',
+    } as any);
+
+    fireEvent.click(screen.getByRole('button', { name: 'authenticate' }));
+
+    await waitFor(() => expect(screen.getByTestId('authStatus').textContent).toBe('error'));
+    expect(screen.getByTestId('authError').textContent).toMatch(/account changed/i);
   });
 });
 

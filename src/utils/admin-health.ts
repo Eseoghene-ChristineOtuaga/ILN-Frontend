@@ -109,11 +109,13 @@ export async function fetchAdminActionHistory(): Promise<AdminActionItem[]> {
         description: `Routine parameter '${pu.parameter}' updated to ${pu.newValue}`,
         actor: GOVERNANCE_ADMIN_ADDRESS,
         timestamp: pu.updatedAt,
+        txHash: pu.txHash,
         isSecuritySensitive: false,
         metadata: {
           parameter: pu.parameter,
           newValue: pu.newValue,
-          proposalId: pu.proposalId,
+          // Direct governance-parameter writes have no enacting proposal.
+          proposalId: pu.proposalId ?? undefined,
         },
       })),
     ];

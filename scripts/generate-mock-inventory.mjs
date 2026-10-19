@@ -329,6 +329,32 @@ export function scanMockInventory(_rootDir = ROOT_DIR) {
         'Signed Soroban create_proposal; the proposal id comes from the contract return value',
       patternType: 'on-chain-call',
       trackingIssue: '#1044',
+      line: 1028,
+      description:
+        'Builds, simulates, signs, submits and confirms create_proposal; proposal id read from the return value (#1055)',
+      patternType: 'on-chain-call',
+      trackingIssue: '#841',
+    },
+    {
+      module: 'Governance',
+      name: 'fetchProtocolParameters',
+      status: 'Real',
+      filePath: 'src/utils/governance.ts',
+      line: 908,
+      description:
+        'Reads governance proposal gates, ILN decimals and accepted tokens; current rates from confirmed events, else unknown (#1054)',
+      patternType: 'on-chain-call',
+      trackingIssue: '#844',
+    },
+    {
+      module: 'Governance',
+      name: 'fetchParameterUpdates',
+      status: 'Real',
+      filePath: 'src/utils/governance.ts',
+      line: 1089,
+      description:
+        'Reads parameter_updated / proposal_executed contract events via Soroban RPC getEvents (#1057)',
+      patternType: 'on-chain-call',
     },
     {
       module: 'Governance',

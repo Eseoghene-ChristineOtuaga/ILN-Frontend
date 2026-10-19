@@ -26,6 +26,15 @@ describe('indexer boundary classifiers', () => {
     expect(classifyIndexerHttpStatus(422)).toBe('malformed');
   });
 
+  it('classifies 429 as rate-limited', () => {
+    expect(classifyIndexerHttpStatus(429)).toBe('rate-limited');
+  });
+
+  it('classifies 500/503 as unavailable', () => {
+    expect(classifyIndexerHttpStatus(500)).toBe('unavailable');
+    expect(classifyIndexerHttpStatus(503)).toBe('unavailable');
+  });
+
   it('returns null for healthy statuses', () => {
     expect(classifyIndexerHttpStatus(200)).toBeNull();
     expect(classifyIndexerHttpStatus(204)).toBeNull();

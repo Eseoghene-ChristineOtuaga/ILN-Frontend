@@ -24,12 +24,17 @@ const mockedHook = vi.mocked(useParameterUpdates);
 
 function event(overrides: Partial<ParameterUpdateEvent> = {}): ParameterUpdateEvent {
   return {
-    id: '7:fee_rate_bps',
+    id: 'aa:protocol_fee_rate_bps',
     proposalId: 7,
-    parameter: 'fee_rate_bps',
+    parameter: 'protocol_fee_rate_bps',
     label: 'Protocol fee rate',
+    oldValue: '50 (0.5%)',
     newValue: '30 (0.3%)',
+    rawNewValue: 30n,
     updatedAt: Math.floor(Date.now() / 1000),
+    ledger: 1000,
+    txHash: 'aa',
+    source: 'protocol',
     ...overrides,
   };
 }
@@ -64,6 +69,16 @@ describe('ParameterUpdateBanner (#153)', () => {
       'href',
       '/governance/7'
     );
+  });
+
+  test('omits the proposal link for a change not enacted by a proposal (#1057)', () => {
+    setUpdates([event({ proposalId: null, source: 'governance' })]);
+    render(<ParameterUpdateBanner />);
+
+    expect(
+      screen.getByText('Protocol update: Protocol fee rate changed to 30 (0.3%)')
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /view governance proposal/i })).toBeNull();
   });
 
   test('shows at most two banners simultaneously', () => {

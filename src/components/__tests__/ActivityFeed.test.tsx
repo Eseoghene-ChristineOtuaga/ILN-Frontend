@@ -1,6 +1,15 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import ActivityFeed from '../ActivityFeed';
+import {
+  freshnessFixtures,
+  proxyErrorEnvelope,
+  proxySuccessEnvelope,
+} from '@/mocks/fixtures/indexer';
+
+function envelope(events: unknown[], meta: Parameters<typeof proxySuccessEnvelope>[2] = {}) {
+  return { ok: true, json: async () => proxySuccessEnvelope('invoice.events', events, meta) };
+}
 
 // Mock fetch
 const globalFetch = global.fetch;
@@ -22,10 +31,7 @@ describe('ActivityFeed', () => {
   });
 
   it('should render empty state when no events', async () => {
-    (global.fetch as any).mockResolvedValue({
-      ok: true,
-      json: async () => [],
-    });
+    (global.fetch as any).mockResolvedValue(envelope([]));
 
     render(<ActivityFeed invoiceId={1n} />);
 
@@ -49,10 +55,7 @@ describe('ActivityFeed', () => {
       },
     ];
 
-    (global.fetch as any).mockResolvedValue({
-      ok: true,
-      json: async () => mockEvents,
-    });
+    (global.fetch as any).mockResolvedValue(envelope(mockEvents));
 
     render(<ActivityFeed invoiceId={1n} />);
 
@@ -73,10 +76,7 @@ describe('ActivityFeed', () => {
       },
     ];
 
-    (global.fetch as any).mockResolvedValue({
-      ok: true,
-      json: async () => mockEvents,
-    });
+    (global.fetch as any).mockResolvedValue(envelope(mockEvents));
 
     render(<ActivityFeed invoiceId={1n} />);
 
@@ -112,5 +112,46 @@ describe('ActivityFeed', () => {
       expect(screen.getByText(/temporarily unavailable/i)).toBeInTheDocument();
       expect(screen.queryByText(/Invoice funded by/)).not.toBeInTheDocument();
     });
+  });
+
+  it('requests events through the same-origin indexer proxy', async () => {
+    (global.fetch as any).mockResolvedValue(envelope([]));
+    render(<ActivityFeed invoiceId={42n} />);
+    await waitFor(() => expect(global.fetch).toHaveBeenCalled());
+    expect((global.fetch as any).mock.calls[0][0]).toBe('/api/indexer/invoices/42/events');
+  });
+
+  it('flags an empty feed from a lagging indexer as stale rather than definitive', async () => {
+    (global.fetch as any).mockResolvedValue(envelope([], { freshness: freshnessFixtures.stale }));
+    render(<ActivityFeed invoiceId={1n} />);
+    expect(await screen.findByText('No activity yet for this invoice.')).toBeInTheDocument();
+    expect(screen.getByText(/Data may be out of date/).closest('[data-freshness]')).toHaveAttribute(
+      'data-freshness',
+      'stale'
+    );
+  });
+
+  it('discloses records the proxy dropped as malformed', async () => {
+    (global.fetch as any).mockResolvedValue(
+      envelope([{ type: 'submitted', timestamp: Date.now() - 60_000 }], { droppedRecords: 2 })
+    );
+    render(<ActivityFeed invoiceId={1n} />);
+    expect(
+      await screen.findByText(/2 records from the indexer could not be displayed/)
+    ).toBeInTheDocument();
+  });
+
+  it('explains a version mismatch without retrying it', async () => {
+    (global.fetch as any).mockResolvedValue({
+      ok: false,
+      status: 502,
+      json: async () =>
+        proxyErrorEnvelope('version_mismatch', 'The indexer API version 2.0.0 is not supported.'),
+    });
+    render(<ActivityFeed invoiceId={1n} />);
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveAttribute('data-testid', 'indexer-notice-malformed');
+    expect(alert).toHaveTextContent('The indexer API version 2.0.0 is not supported.');
+    expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 });

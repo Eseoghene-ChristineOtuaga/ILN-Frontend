@@ -264,5 +264,20 @@
     "select": "Select language",
     "en": "English",
     "es": "Español"
+  },
+  "addressBook": {
+    "recovery": {
+      "title": "Saved address book was reset",
+      "CORRUPT": "The saved data could not be read, so it was removed. Add your contacts again.",
+      "UNSUPPORTED_VERSION": "The saved data was written by an unsupported app version, so it was removed.",
+      "TAMPERED": "The saved data failed its integrity check and may have been modified, so it was removed.",
+      "SCOPE_MISMATCH": "The saved data belongs to a different wallet, network or site, so it was removed.",
+      "EXPIRED": "The saved data was unused for longer than the retention period, so it was removed.",
+      "INVALID_SHAPE": "The saved data had an unexpected format, so it was removed.",
+      "dismiss": "Dismiss"
+    },
+    "errors": {
+      "storageUnavailable": "Browser storage is unavailable, so address book changes cannot be saved."
+    }
   }
 }

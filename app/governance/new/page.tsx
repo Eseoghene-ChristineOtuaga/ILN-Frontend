@@ -3,19 +3,25 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { useWallet } from '@/context/WalletContext';
-import { useTransaction } from '@/hooks/useTransaction';
-import { useBalances } from '@/hooks/useBalances';
-import { useApprovedTokens } from '@/hooks/useApprovedTokens';
 import {
   fetchProtocolParameters,
+  fetchProposerBalance,
   createProposal,
   CreateProposalFormType,
+  CreateProposalPayload,
+  CreateProposalStage,
   AcceptedToken,
   ProtocolParameters,
-  isValidStellarAddress,
   lookupToken,
   simulateProposalEffect,
   ProposalSimulationResult,
+  validateProposalPayload,
+  issuesByField,
+  toValidationContext,
+  requiredProposerBalance,
+  ProposalValidationError,
+  CreateProposalError,
+  ChainParametersError,
 } from '@/utils/governance';
 import { CONTRACT_ERROR_MAP, parseContractError } from '@/lib/contract/errors';
 import { Input } from '@/components/Input';
@@ -35,12 +41,67 @@ interface FormData {
   removeTokenAddress: string;
 }
 
+type FormErrors = Partial<Record<keyof FormData | 'submit', string>>;
+
+/** Fields whose checks need chain parameters (ranges, current value, allowlist). */
+const CHAIN_DEPENDENT_FIELDS = new Set<keyof FormData>([
+  'newValueBps',
+  'tokenAddress',
+  'removeTokenAddress',
+]);
+
+const STAGE_LABELS: Record<CreateProposalStage, string> = {
+  validating: 'Validating proposal…',
+  building: 'Building transaction…',
+  simulating: 'Simulating against the governance contract…',
+  awaiting_signature: 'Waiting for your wallet signature…',
+  submitting: 'Submitting transaction…',
+  confirming: 'Waiting for network confirmation…',
+  confirmed: 'Proposal confirmed on-chain.',
+};
+
+/** Format a base-unit amount as a decimal token string without float rounding. */
+function formatTokenAmount(amount: bigint, decimals: number): string {
+  const scale = 10n ** BigInt(decimals);
+  const whole = amount / scale;
+  const fraction = (amount % scale).toString().padStart(decimals, '0').replace(/0+$/, '');
+  return fraction ? `${whole.toLocaleString()}.${fraction}` : whole.toLocaleString();
+}
+
+function formatBps(value: number): string {
+  return `${value} (${value / 100}%)`;
+}
+
+function describeSubmitError(error: unknown): string {
+  if (error instanceof CreateProposalError) {
+    switch (error.code) {
+      case 'USER_REJECTED':
+        return 'Signature declined in your wallet. No proposal was created.';
+      case 'CONFIRMATION_TIMEOUT':
+        return `Transaction ${error.details.txHash ?? ''} was submitted but is not confirmed yet. Check its status before submitting again.`;
+      case 'TRANSACTION_FAILED':
+        return `The proposal transaction failed on-chain${
+          error.details.txHash ? ` (${error.details.txHash})` : ''
+        }. No proposal was created.`;
+      default:
+        return error.message.replace(/^[A-Z_]+: /, '');
+    }
+  }
+  if (error instanceof ChainParametersError) {
+    return 'Protocol parameters could not be read from the network. Try again shortly.';
+  }
+  const code = parseContractError(error);
+  if (code) return CONTRACT_ERROR_MAP[code].message;
+  return error instanceof Error ? error.message : String(error);
+}
+
 export default function NewGovernanceProposalPage() {
   const router = useRouter();
   const { address, isConnected } = useWallet();
   const { execute, loading: txLoading, signingModal } = useTransaction();
   const { tokens } = useApprovedTokens();
   const { balances, isLoading: balancesLoading } = useBalances(tokens);
+  const { address, isConnected, signTx } = useWallet();
 
   const [formData, setFormData] = useState<FormData>({
     formType: '',
@@ -51,28 +112,84 @@ export default function NewGovernanceProposalPage() {
     removeTokenAddress: '',
   });
   const [protocolParams, setProtocolParams] = useState<ProtocolParameters | null>(null);
+  const [paramsError, setParamsError] = useState<string | null>(null);
   const [loadingParams, setLoadingParams] = useState(true);
-  const [formErrors, setFormErrors] = useState<Partial<Record<keyof FormData, string>>>({});
+  const [balanceState, setBalanceState] = useState<{
+    address: string;
+    value: bigint | null;
+    error: string | null;
+  } | null>(null);
+  const [formErrors, setFormErrors] = useState<FormErrors>({});
   const [resolvedToken, setResolvedToken] = useState<AcceptedToken | null>(null);
   const [tokenLookupError, setTokenLookupError] = useState<string | null>(null);
   const [simulationResult, setSimulationResult] = useState<ProposalSimulationResult | null>(null);
   const [loadingSimulation, setLoadingSimulation] = useState(false);
+  const [stage, setStage] = useState<CreateProposalStage | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
-  const userILNBalance = useMemo(() => {
-    // Assuming ILN token balance is available in balances array
-    // For now, mocking as 1250 ILN from governance.ts mock
-    return 1250;
-  }, [balances]);
+  // Incremented by the Retry buttons to re-run the reads below.
+  const [paramsAttempt, setParamsAttempt] = useState(0);
+  const [balanceAttempt, setBalanceAttempt] = useState(0);
 
   useEffect(() => {
-    const getParams = async () => {
-      setLoadingParams(true);
-      const params = await fetchProtocolParameters();
-      setProtocolParams(params);
-      setLoadingParams(false);
+    let cancelled = false;
+    const readParams = async () => {
+      try {
+        const params = await fetchProtocolParameters();
+        if (cancelled) return;
+        setProtocolParams(params);
+        setParamsError(null);
+      } catch (e: unknown) {
+        if (cancelled) return;
+        setProtocolParams(null);
+        setParamsError(
+          e instanceof ChainParametersError
+            ? `Protocol parameters could not be read from the network (${e.failed.join(', ')}).`
+            : 'Protocol parameters could not be read from the network.'
+        );
+      } finally {
+        if (!cancelled) setLoadingParams(false);
+      }
     };
-    getParams();
-  }, []);
+    void readParams();
+    return () => {
+      cancelled = true;
+    };
+  }, [paramsAttempt]);
+
+  const retryParams = () => {
+    setLoadingParams(true);
+    setParamsError(null);
+    setParamsAttempt((n) => n + 1);
+  };
+
+  useEffect(() => {
+    if (!address) return;
+    let cancelled = false;
+    const readBalance = async () => {
+      try {
+        const value = await fetchProposerBalance(address);
+        if (!cancelled) setBalanceState({ address, value, error: null });
+      } catch (e: unknown) {
+        if (!cancelled) {
+          setBalanceState({
+            address,
+            value: null,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      }
+    };
+    void readBalance();
+    return () => {
+      cancelled = true;
+    };
+  }, [address, balanceAttempt]);
+
+  // A balance read for a previous wallet address is never shown for the current one.
+  const currentBalance = address && balanceState?.address === address ? balanceState : null;
+  const balance = currentBalance?.value ?? null;
+  const balanceError = currentBalance?.error ?? null;
 
   useEffect(() => {
     let cancelled = false;
@@ -80,20 +197,14 @@ export default function NewGovernanceProposalPage() {
       const addr = formData.tokenAddress.trim();
       if (formData.formType === 'AddToken' && addr) {
         try {
-          const token = await lookupToken(addr);
+          const token = await lookupToken(addr, protocolParams?.acceptedTokens);
           if (!cancelled) {
             setResolvedToken(token);
             setTokenLookupError(null);
           }
         } catch (e: unknown) {
           if (!cancelled) {
-            const code = parseContractError(e);
-            const msg = code
-              ? CONTRACT_ERROR_MAP[code].message
-              : e instanceof Error
-                ? e.message
-                : String(e);
-            setTokenLookupError(msg);
+            setTokenLookupError(describeSubmitError(e));
             setResolvedToken(null);
           }
         }
@@ -106,45 +217,41 @@ export default function NewGovernanceProposalPage() {
       cancelled = true;
       clearTimeout(debounceLookup);
     };
-  }, [formData.tokenAddress, formData.formType]);
+  }, [formData.tokenAddress, formData.formType, protocolParams]);
+
+  const payload = useMemo<CreateProposalPayload | null>(() => {
+    if (!formData.formType) return null;
+    const trimmedValue = formData.newValueBps.trim();
+    return {
+      formType: formData.formType,
+      title: formData.title,
+      description: formData.description,
+      newValueBps: trimmedValue === '' ? undefined : Number(trimmedValue),
+      tokenAddress: formData.formType === 'AddToken' ? formData.tokenAddress.trim() : undefined,
+      tokenName: resolvedToken?.symbol,
+      tokenDecimals: resolvedToken?.decimals,
+      removeTokenAddress:
+        formData.formType === 'RemoveToken' ? formData.removeTokenAddress : undefined,
+    };
+  }, [formData, resolvedToken]);
 
   // Simulate proposal effect when form changes
   useEffect(() => {
     let cancelled = false;
     const debounceSimulation = setTimeout(async () => {
-      // Only simulate if form has required fields
-      if (!formData.formType || !formData.title) {
+      if (!payload || !formData.title) {
         setSimulationResult(null);
         return;
       }
-
-      // Build payload for simulation
-      const payload = {
-        formType: formData.formType as CreateProposalFormType,
-        title: formData.title,
-        description: formData.description,
-        newValueBps: formData.newValueBps ? parseInt(formData.newValueBps) : undefined,
-        tokenAddress: formData.formType === 'AddToken' ? formData.tokenAddress : undefined,
-        tokenName: resolvedToken?.name,
-        removeTokenAddress:
-          formData.formType === 'RemoveToken' ? formData.removeTokenAddress : undefined,
-      };
-
       try {
         setLoadingSimulation(true);
         const result = await simulateProposalEffect(payload);
-        if (!cancelled) {
-          setSimulationResult(result);
-        }
+        if (!cancelled) setSimulationResult(result);
       } catch (err) {
         console.warn('Failed to simulate proposal effect:', err);
-        if (!cancelled) {
-          setSimulationResult(null);
-        }
+        if (!cancelled) setSimulationResult(null);
       } finally {
-        if (!cancelled) {
-          setLoadingSimulation(false);
-        }
+        if (!cancelled) setLoadingSimulation(false);
       }
     }, 800);
 
@@ -152,7 +259,7 @@ export default function NewGovernanceProposalPage() {
       cancelled = true;
       clearTimeout(debounceSimulation);
     };
-  }, [formData, resolvedToken]);
+  }, [payload, formData.title]);
 
   const handleChange = (
     e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>
@@ -168,62 +275,61 @@ export default function NewGovernanceProposalPage() {
     setFormErrors((prev) => {
       const next = { ...prev };
       delete next[name as keyof FormData];
+      delete next.submit;
       return next;
     });
   };
 
+  /**
+   * Validate against the contract schema (#1056) with chain parameters
+   * (#1054). Without parameters only the text fields can be checked; the
+   * chain-dependent fields are left for when parameters load.
+   */
   const validateForm = useCallback(() => {
-    const errors: Partial<Record<keyof FormData, string>> = {};
-    if (!formData.formType) errors.formType = 'Action Type is required.';
-    if (!formData.title.trim()) errors.title = 'Title is required.';
-    if (!formData.description.trim()) errors.description = 'Description is required.';
-
-    if (formData.formType === 'FeeRate' || formData.formType === 'MaxDiscountRate') {
-      const value = parseInt(formData.newValueBps);
-      if (isNaN(value) || value < 0 || value > 5000) {
-        errors.newValueBps = 'Proposed Value must be between 0 and 5000 basis points.';
+    const errors: FormErrors = {};
+    if (!payload) {
+      errors.formType = 'Action Type is required.';
+      if (!formData.title.trim()) errors.title = 'Title is required.';
+      if (!formData.description.trim()) errors.description = 'Description is required.';
+    } else {
+      const context = protocolParams
+        ? toValidationContext(protocolParams)
+        : {
+            feeRateRange: { min: 0, max: 0 },
+            maxDiscountRateRange: { min: 0, max: 0 },
+            currentFeeRateBps: null,
+            currentMaxDiscountRateBps: null,
+            acceptedTokenAddresses: [],
+          };
+      const result = validateProposalPayload(payload, context);
+      if (!result.ok) {
+        for (const [field, message] of Object.entries(issuesByField(result.issues))) {
+          if (!protocolParams && CHAIN_DEPENDENT_FIELDS.has(field as keyof FormData)) continue;
+          errors[field as keyof FormData] = message;
+        }
       }
-    }
-
-    if (formData.formType === 'AddToken') {
-      if (!formData.tokenAddress.trim()) {
-        errors.tokenAddress = 'Token address is required.';
-      } else if (!isValidStellarAddress(formData.tokenAddress.trim())) {
-        errors.tokenAddress = 'Invalid Stellar address format.';
-      } else if (tokenLookupError) {
+      if (formData.formType === 'AddToken' && tokenLookupError) {
         errors.tokenAddress = tokenLookupError;
-      }
-    }
-
-    if (formData.formType === 'RemoveToken') {
-      if (!formData.removeTokenAddress.trim()) {
-        errors.removeTokenAddress = 'Token address is required.';
-      } else if (
-        !protocolParams?.acceptedTokens.some((t) => t.address === formData.removeTokenAddress)
-      ) {
-        errors.removeTokenAddress = 'Token not found in accepted tokens.';
       }
     }
     setFormErrors(errors);
     return Object.keys(errors).length === 0;
-  }, [formData, protocolParams, tokenLookupError]);
+  }, [
+    payload,
+    formData.title,
+    formData.description,
+    formData.formType,
+    protocolParams,
+    tokenLookupError,
+  ]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isConnected || !address) {
-      alert('Please connect your wallet.');
-      return;
-    }
-    if (!protocolParams) {
-      alert('Protocol parameters not loaded.');
-      return;
-    }
-    if (!validateForm()) {
-      return;
-    }
+    if (!isConnected || !address || !protocolParams || !payload) return;
+    if (!validateForm()) return;
 
-    const ipfsHash = 'QmTg...mock'; // Mock IPFS CID generation
-
+    setSubmitting(true);
+    setStage(null);
     try {
       const payload = {
         formType: formData.formType as CreateProposalFormType,
@@ -261,38 +367,60 @@ IPFS Hash: ${ipfsHash}`,
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       alert(`Failed to create proposal: ${msg}`);
+      const { proposalId } = await createProposal(payload, address, signTx, {
+        context: toValidationContext(protocolParams),
+        onStage: setStage,
+      });
+      router.push(`/governance/${proposalId}`);
+    } catch (error: unknown) {
+      setStage(null);
+      if (error instanceof ProposalValidationError) {
+        setFormErrors(issuesByField(error.issues));
+      } else {
+        setFormErrors({ submit: describeSubmitError(error) });
+      }
+    } finally {
+      setSubmitting(false);
     }
   };
 
+  const requiredBalance = protocolParams ? requiredProposerBalance(protocolParams) : null;
+  const insufficientBalance =
+    balance !== null && requiredBalance !== null && balance < requiredBalance;
+
   const isSubmitDisabled = useMemo(() => {
-    const hasErrors = Object.keys(formErrors).length > 0;
+    const hasErrors = Object.keys(formErrors).some((key) => key !== 'submit');
     const isFormEmpty = !formData.formType || !formData.title || !formData.description;
-    const insufficientBalance = protocolParams && userILNBalance < protocolParams.minProposalILN;
     return (
       hasErrors ||
       isFormEmpty ||
+      !protocolParams ||
+      balance === null ||
       insufficientBalance ||
-      txLoading ||
-      loadingParams ||
-      balancesLoading
+      submitting ||
+      loadingParams
     );
   }, [
     formErrors,
     formData,
     protocolParams,
-    userILNBalance,
-    txLoading,
+    balance,
+    insufficientBalance,
+    submitting,
     loadingParams,
-    balancesLoading,
   ]);
 
   const currentParameterValue = useMemo(() => {
     if (!protocolParams) return '';
     switch (formData.formType) {
       case 'FeeRate':
-        return `${protocolParams.feeRateBps} (${protocolParams.feeRateBps / 100}%)`;
+        return protocolParams.feeRateBps === null
+          ? 'its current value (not confirmed on-chain)'
+          : formatBps(protocolParams.feeRateBps);
       case 'MaxDiscountRate':
-        return `${protocolParams.maxDiscountRateBps} (${protocolParams.maxDiscountRateBps / 100}%)`;
+        return protocolParams.maxDiscountRateBps === null
+          ? 'its current value (not confirmed on-chain)'
+          : formatBps(protocolParams.maxDiscountRateBps);
       case 'AddToken':
       case 'RemoveToken':
         return `[${protocolParams.acceptedTokens.map((t) => t.symbol).join(', ')}]`;
@@ -306,8 +434,8 @@ IPFS Hash: ${ipfsHash}`,
     switch (formData.formType) {
       case 'FeeRate':
       case 'MaxDiscountRate': {
-        const value = formData.newValueBps ? parseInt(formData.newValueBps) : undefined;
-        return value !== undefined ? `${value} (${value / 100}%)` : '';
+        const value = formData.newValueBps.trim() === '' ? NaN : Number(formData.newValueBps);
+        return Number.isInteger(value) ? formatBps(value) : '';
       }
       case 'AddToken': {
         if (!resolvedToken) return '';
@@ -329,10 +457,15 @@ IPFS Hash: ${ipfsHash}`,
     }
   }, [formData, protocolParams, resolvedToken]);
 
+  const rateRange =
+    formData.formType === 'MaxDiscountRate'
+      ? protocolParams?.maxDiscountRateRange
+      : protocolParams?.feeRateRange;
+
   if (loadingParams) {
     return (
-      <div className="flex justify-center items-center h-screen">
-        <Loader2 className="h-8 w-8 animate-spin" />
+      <div className="flex justify-center items-center h-screen" role="status">
+        <Loader2 className="h-8 w-8 animate-spin" aria-hidden="true" />
         <p className="ml-2">Loading protocol parameters...</p>
       </div>
     );
@@ -344,7 +477,19 @@ IPFS Hash: ${ipfsHash}`,
 
       <h1 className="text-3xl font-bold mb-6">Create New Governance Proposal</h1>
 
-      <form onSubmit={handleSubmit} className="space-y-6">
+      {paramsError && (
+        <div
+          role="alert"
+          className="mb-6 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800 dark:border-red-800 dark:bg-red-950 dark:text-red-200"
+        >
+          <p>{paramsError} Proposals cannot be submitted until they load.</p>
+          <button type="button" className="mt-2 font-semibold underline" onClick={retryParams}>
+            Retry
+          </button>
+        </div>
+      )}
+
+      <form onSubmit={handleSubmit} className="space-y-6" noValidate>
         <label className="block">
           <span className="text-zinc-700 dark:text-zinc-300">Action Type</span>
           <Select
@@ -422,9 +567,14 @@ IPFS Hash: ${ipfsHash}`,
               onChange={handleChange}
               onBlur={validateForm}
               className="mt-1 block w-full"
-              placeholder="e.g., 350 for 3.5% (0-5000)"
-              min={0}
-              max={5000}
+              placeholder={
+                rateRange
+                  ? `e.g., 350 for 3.5% (${rateRange.min}-${rateRange.max})`
+                  : 'e.g., 350 for 3.5%'
+              }
+              min={rateRange?.min}
+              max={rateRange?.max}
+              step={1}
               aria-describedby={formErrors.newValueBps ? 'newValueBps-error' : undefined}
               aria-invalid={Boolean(formErrors.newValueBps)}
               required
@@ -440,8 +590,8 @@ IPFS Hash: ${ipfsHash}`,
         {formData.formType === 'AddToken' && (
           <label className="block">
             <span className="inline-flex items-center text-zinc-700 dark:text-zinc-300">
-              Token Address (G...)
-              <FieldTooltip content="ILN does not support fee-on-transfer tokens. The token must transfer the exact amount specified, with no fee deducted." />
+              Token Address (C...)
+              <FieldTooltip content="Only Soroban token contracts can be accepted. ILN does not support fee-on-transfer tokens: the token must transfer the exact amount specified, with no fee deducted." />
             </span>
             <Input
               type="text"
@@ -450,14 +600,15 @@ IPFS Hash: ${ipfsHash}`,
               onChange={handleChange}
               onBlur={validateForm}
               className="mt-1 block w-full"
-              placeholder="e.g., G... (Stellar asset issuer address)"
+              placeholder="e.g., C... (Soroban token contract ID)"
               aria-describedby={formErrors.tokenAddress ? 'tokenAddress-error' : undefined}
               aria-invalid={Boolean(formErrors.tokenAddress)}
               required
             />
             {resolvedToken && (
               <p className="text-sm text-green-600 dark:text-green-400 mt-1">
-                Resolved: {resolvedToken.name} ({resolvedToken.symbol})
+                Resolved: {resolvedToken.name} ({resolvedToken.symbol}, {resolvedToken.decimals}{' '}
+                decimals)
               </p>
             )}
             {formErrors.tokenAddress && (
@@ -498,10 +649,24 @@ IPFS Hash: ${ipfsHash}`,
           </label>
         )}
 
-        {isConnected && protocolParams && userILNBalance < protocolParams.minProposalILN && (
+        {isConnected && balanceError && (
+          <div role="alert" className="text-red-500 text-sm">
+            {balanceError}{' '}
+            <button
+              type="button"
+              className="font-semibold underline"
+              onClick={() => setBalanceAttempt((n) => n + 1)}
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
+        {isConnected && insufficientBalance && protocolParams && balance !== null && (
           <div className="text-red-500 text-sm">
-            Your current ILN balance ({userILNBalance}) is below the minimum required to submit a
-            proposal ({protocolParams.minProposalILN}).
+            Your current ILN balance ({formatTokenAmount(balance, protocolParams.govTokenDecimals)})
+            is below the minimum required to submit a proposal (
+            {formatTokenAmount(requiredBalance!, protocolParams.govTokenDecimals)}).
           </div>
         )}
 
@@ -564,16 +729,30 @@ IPFS Hash: ${ipfsHash}`,
           </div>
         )}
 
+        <p role="status" aria-live="polite" className="text-sm text-zinc-600 dark:text-zinc-400">
+          {stage ? STAGE_LABELS[stage] : ''}
+        </p>
+
+        {formErrors.submit && (
+          <div role="alert" className="text-red-500 text-sm">
+            {formErrors.submit}
+          </div>
+        )}
+
         <Button
           type="submit"
           className="w-full"
           disabled={isSubmitDisabled || !isConnected || !address}
+          aria-busy={submitting}
         >
-          {(txLoading || loadingParams || balancesLoading) && (
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-          )}
+          {submitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />}
           Submit Proposal
         </Button>
+        {!isConnected && (
+          <p className="text-center text-sm text-zinc-500">
+            Connect your wallet to submit a proposal.
+          </p>
+        )}
       </form>
       {signingModal}
     </main>

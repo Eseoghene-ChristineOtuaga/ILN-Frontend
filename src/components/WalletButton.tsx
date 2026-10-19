@@ -21,6 +21,10 @@ export default function WalletButton() {
     disconnect,
     networkMismatch,
     error,
+    authStatus,
+    authError,
+    authDiagnostics,
+    authenticate,
   } = useWallet();
   const { tokens } = useApprovedTokens();
   const allowedTokens = useMemo(() => tokens.filter((token) => token.isAllowed), [tokens]);
@@ -39,6 +43,25 @@ export default function WalletButton() {
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
+
+  const handleCopyAddress = async () => {
+    if (!address) return;
+    try {
+      await navigator.clipboard.writeText(address);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard unavailable — nothing actionable to surface.
+    }
+  };
+
+  const handleAuthenticate = () => {
+    void authenticate().catch((cause: unknown) => {
+      if (!(cause instanceof Error)) {
+        console.error('SEP-10 authentication failed', cause);
+      }
+    });
+  };
 
   if (isConnected) {
     return (
@@ -125,6 +148,60 @@ export default function WalletButton() {
                 )}
               </div>
             )}
+
+            <section
+              aria-label="Authentication readiness"
+              className="flex flex-col gap-2 border-t border-outline-variant/10 p-3"
+            >
+              <p className="px-1 text-[10px] font-bold uppercase tracking-[0.16em] text-on-surface-variant/70">
+                SEP-10 authentication
+              </p>
+              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 px-1 text-xs text-on-surface-variant">
+                <dt>Domain</dt>
+                <dd className="truncate text-right text-on-surface">
+                  {authDiagnostics.domain ?? 'Not discovered'}
+                </dd>
+                <dt>Network</dt>
+                <dd className="text-right text-on-surface">{authDiagnostics.network}</dd>
+                <dt>Session expiry</dt>
+                <dd className="text-right text-on-surface">
+                  {authDiagnostics.expiresAt
+                    ? new Intl.DateTimeFormat(undefined, {
+                        dateStyle: 'short',
+                        timeStyle: 'short',
+                      }).format(authDiagnostics.expiresAt)
+                    : 'No active session'}
+                </dd>
+                <dt>Auth server</dt>
+                <dd className="text-right text-on-surface">
+                  {authDiagnostics.serverHealth === 'available'
+                    ? 'Available'
+                    : authDiagnostics.serverHealth === 'unavailable'
+                      ? 'Unavailable'
+                      : 'Not checked'}
+                </dd>
+              </dl>
+              <button
+                type="button"
+                onClick={handleAuthenticate}
+                disabled={networkMismatch || authStatus === 'authenticating'}
+                className="min-h-10 rounded-lg bg-primary px-3 py-2 text-sm font-semibold text-surface-container-lowest transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {authStatus === 'authenticating'
+                  ? 'Authenticating...'
+                  : authStatus === 'authenticated'
+                    ? 'Refresh authentication'
+                    : 'Authenticate wallet'}
+              </button>
+              {authError && (
+                <p className="px-1 text-xs text-error" role="alert">
+                  {authError.message}
+                </p>
+              )}
+              <p className="sr-only" aria-live="polite">
+                Authentication status: {authStatus}
+              </p>
+            </section>
 
             <div className="flex flex-col gap-1 border-t border-outline-variant/10 p-2">
               <TestnetFaucetButton />

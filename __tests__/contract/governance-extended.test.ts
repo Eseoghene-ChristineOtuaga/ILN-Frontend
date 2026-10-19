@@ -3,14 +3,14 @@
  * - executeProposal, vetoProposal, getVetoHistory
  * - getDelegationInfo (all branches)
  * - lookupToken (all branches)
- * - createProposal (MaxDiscountRate, RemoveToken paths)
- * - fetchParameterUpdates
+ * - createProposal schema rejections (no local mutation)
+ * - fetchParameterUpdates (confirmed contract events)
  * - fetchVotesForAddress
  * - timeRemaining (active proposal paths: days+hours, hours+mins, "Ended")
  * - getUserVote
  * - MOCK_PROPOSALS / MOCK_VOTES data
  */
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { rpc, nativeToScVal } from '@stellar/stellar-sdk';
 import { server } from '@/mocks/server';
@@ -54,6 +54,15 @@ import {
   governanceWriteOptions,
   passthroughSignTx,
 } from '@/test-utils/governance-rpc';
+  clearGovernanceTestSession,
+  establishGovernanceTestSession,
+} from '@/utils/__tests__/helpers/governanceSession';
+import {
+  PROPOSAL_CONTEXT,
+  USDC_CONTRACT,
+  passthroughSignTx,
+  stubProposalRpc,
+} from '@/utils/__tests__/helpers/proposalRpc';
 
 const SIGNER = 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF';
 const mockSignTx = vi.fn(async (_xdr: string) => 'signedXDR');
@@ -175,7 +184,9 @@ describe('governance – lookupToken', () => {
 
   it('rejects already accepted tokens', async () => {
     await expect(
-      lookupToken('CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75')
+      lookupToken(USDC_CONTRACT, [
+        { address: USDC_CONTRACT, name: 'USD Coin', symbol: 'USDC', decimals: 7 },
+      ])
     ).rejects.toThrow('already an accepted token');
   });
 
@@ -201,11 +212,22 @@ describe('governance – lookupToken', () => {
         result: {
           retval: nativeToScVal('wBTC'),
         },
+      } as unknown as rpc.Api.SimulateTransactionResponse)
+      .mockResolvedValueOnce({
+        error: undefined,
+        transactionData:
+          {} as unknown as rpc.Api.SimulateTransactionSuccessResponse['transactionData'],
+        minResourceFee: '100',
+        events: [],
+        result: {
+          retval: nativeToScVal(8, { type: 'u32' }),
+        },
       } as unknown as rpc.Api.SimulateTransactionResponse);
 
-    const token = await lookupToken('CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC');
+    const token = await lookupToken('CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC', []);
     expect(token.name).toBe('Wrapped Bitcoin');
     expect(token.symbol).toBe('wBTC');
+    expect(token.decimals).toBe(8);
     expect(token.address).toBe('CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC');
     mockSimulate.mockRestore();
   });
@@ -226,10 +248,17 @@ describe('governance – lookupToken', () => {
           {} as unknown as rpc.Api.SimulateTransactionSuccessResponse['transactionData'],
         minResourceFee: '100',
         events: [],
+      } as unknown as rpc.Api.SimulateTransactionResponse)
+      .mockResolvedValueOnce({
+        error: undefined,
+        transactionData:
+          {} as unknown as rpc.Api.SimulateTransactionSuccessResponse['transactionData'],
+        minResourceFee: '100',
+        events: [],
       } as unknown as rpc.Api.SimulateTransactionResponse);
 
     await expect(
-      lookupToken('CD3TE3IAHM737P236XZL2OYU275ZKD6MN7YH7PYYAXYIGEH55OPEWYJC')
+      lookupToken('CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC', [])
     ).rejects.toThrow('FeeOnTransferToken');
     mockSimulate.mockRestore();
   });
@@ -276,37 +305,116 @@ describe('governance – createProposal extended paths', () => {
         governanceWriteOptions(stub)
       )
     ).rejects.toThrow(/removeTokenAddress/);
+describe('governance – createProposal schema rejections', () => {
+  // Invalid payloads are rejected before any RPC call, signature or local
+  // write: there is no mock proposal to fall back to (#1055, #1056).
+  let rpcStub: ReturnType<typeof stubProposalRpc>;
+
+  beforeEach(() => {
+    establishGovernanceTestSession(SIGNER);
+    rpcStub = stubProposalRpc();
+  });
+
+  afterEach(() => {
+    rpcStub.restore();
+    clearGovernanceTestSession();
+  });
+
+  const invalid: Array<[string, CreateProposalPayload, string]> = [
+    [
+      'MaxDiscountRate above the invoice contract limit',
+      {
+        formType: 'MaxDiscountRate',
+        title: 'Raise max discount',
+        description: 'Raise the max discount above what invoices accept',
+        newValueBps: 6_000,
+      },
+      'OUT_OF_RANGE',
+    ],
+    [
+      'RemoveToken for a token that is not accepted',
+      {
+        formType: 'RemoveToken',
+        title: 'Remove Unknown',
+        description: 'Remove a token that is not in the allowlist',
+        removeTokenAddress: 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC',
+      },
+      'NOT_ACCEPTED',
+    ],
+    [
+      'RemoveToken without a target',
+      {
+        formType: 'RemoveToken',
+        title: 'Remove token (missing address)',
+        description: 'RemoveToken form submitted without a target address',
+      },
+      'REQUIRED',
+    ],
+    [
+      'AddToken with an account address',
+      {
+        formType: 'AddToken',
+        title: 'Add account',
+        description: 'An account address is not a token contract',
+        tokenAddress: SIGNER,
+        tokenDecimals: 7,
+      },
+      'INVALID_CONTRACT_ADDRESS',
+    ],
+    [
+      'AddToken whose decimals were never read',
+      {
+        formType: 'AddToken',
+        title: 'Add unnamed token',
+        description: 'Add a token without resolving its decimals first',
+        tokenAddress: 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC',
+      },
+      'DECIMALS_UNRESOLVED',
+    ],
+  ];
+
+  it.each(invalid)('rejects %s', async (_name, payload, code) => {
+    const before = MOCK_PROPOSALS.length;
+    const signTx = vi.fn(passthroughSignTx);
+    const error = await createProposal(payload, SIGNER, signTx, {
+      context: PROPOSAL_CONTEXT,
+    }).catch((e) => e);
+
+    expect(error.code).toBe('PROPOSAL_VALIDATION_FAILED');
+    expect(error.issues.map((i: { code: string }) => i.code)).toContain(code);
+    expect(rpcStub.getAccount).not.toHaveBeenCalled();
+    expect(signTx).not.toHaveBeenCalled();
+    expect(MOCK_PROPOSALS.length).toBe(before);
   });
 });
 
 describe('governance – fetchParameterUpdates', () => {
-  it('returns parameter updates from executed proposals', async () => {
-    vi.useFakeTimers();
-    const promise = fetchParameterUpdates();
-    vi.runAllTimers();
-    const updates = await promise;
-
-    expect(Array.isArray(updates)).toBe(true);
-    // Should contain updates from executed proposals (4, 7)
-    for (const update of updates) {
-      expect(update).toHaveProperty('id');
-      expect(update).toHaveProperty('proposalId');
-      expect(update).toHaveProperty('parameter');
-      expect(update).toHaveProperty('label');
-      expect(update).toHaveProperty('newValue');
-      expect(update).toHaveProperty('updatedAt');
-    }
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
-  it('updates are sorted newest first', async () => {
-    vi.useFakeTimers();
-    const promise = fetchParameterUpdates();
-    vi.runAllTimers();
-    const updates = await promise;
+  it('returns only confirmed contract events', async () => {
+    vi.spyOn(rpc.Server.prototype, 'getLatestLedger').mockResolvedValue({
+      sequence: 50_000,
+    } as never);
+    const getEvents = vi.spyOn(rpc.Server.prototype, 'getEvents').mockResolvedValue({
+      events: [],
+      cursor: '',
+      latestLedger: 50_000,
+    } as never);
 
-    for (let i = 1; i < updates.length; i++) {
-      expect(updates[i - 1].updatedAt).toBeGreaterThanOrEqual(updates[i].updatedAt);
-    }
+    const updates = await fetchParameterUpdates();
+
+    expect(updates).toEqual([]);
+    expect(getEvents).toHaveBeenCalledTimes(1);
+    expect(MOCK_PROPOSALS.some((p) => p.status === 'Executed')).toBe(true);
+  });
+
+  it('throws when RPC cannot answer instead of deriving updates from local proposals', async () => {
+    vi.spyOn(rpc.Server.prototype, 'getLatestLedger').mockRejectedValue(new Error('offline'));
+    await expect(fetchParameterUpdates()).rejects.toMatchObject({
+      code: 'PARAMETER_EVENTS_UNAVAILABLE',
+    });
   });
 });
 
@@ -530,6 +638,92 @@ describe('governance – castVote / executeProposal preflight guards', () => {
       castVote(1, 'For', '', passthroughSignTx(), governanceWriteOptions(stub))
     ).rejects.toThrow(/SOURCE_ACCOUNT_MISSING/);
     expect(stub.sendTransaction).not.toHaveBeenCalled();
+  it('reads the governance getters and does not return the old 50 / 500 / 500 constants', async () => {
+    const simulate = vi
+      .spyOn(rpc.Server.prototype, 'simulateTransaction')
+      .mockRejectedValue(new Error('offline'));
+    try {
+      await expect(fetchProtocolParameters()).rejects.toMatchObject({
+        code: 'CHAIN_PARAMETERS_UNAVAILABLE',
+      });
+      expect(simulate).toHaveBeenCalled();
+    } finally {
+      simulate.mockRestore();
+    }
+  });
+});
+
+describe('governance – castVote / executeProposal tx-hash generation fallback', () => {
+  it('castVote logs a warning and falls back to a random hash when hash generation throws', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const randomSpy = vi.spyOn(Math, 'random').mockImplementationOnce(() => {
+      throw new Error('entropy source unavailable');
+    });
+
+    vi.useFakeTimers();
+    const promise = castVote(4, 'For', SIGNER, mockSignTx);
+    vi.runAllTimers();
+    const hash = await promise;
+
+    expect(typeof hash).toBe('string');
+    expect(hash.length).toBeGreaterThan(0);
+    expect(warnSpy).toHaveBeenCalledWith('On-chain vote recording fallback:', expect.any(Error));
+
+    randomSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
+  it('executeProposal logs a warning and falls back to a random hash when hash generation throws', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const randomSpy = vi.spyOn(Math, 'random').mockImplementationOnce(() => {
+      throw new Error('entropy source unavailable');
+    });
+
+    vi.useFakeTimers();
+    const promise = executeProposal(7, SIGNER, mockSignTx);
+    vi.runAllTimers();
+    const hash = await promise;
+
+    expect(typeof hash).toBe('string');
+    expect(hash.length).toBeGreaterThan(0);
+    expect(warnSpy).toHaveBeenCalledWith(
+      'On-chain proposal execution fallback:',
+      expect.any(Error)
+    );
+
+    randomSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+});
+
+describe('governance – castVote / executeProposal branch edge cases', () => {
+  it('castVote skips vote-tally update for a non-existent proposal but still returns a hash', async () => {
+    vi.useFakeTimers();
+    const promise = castVote(9999, 'For', SIGNER, mockSignTx);
+    vi.runAllTimers();
+    const hash = await promise;
+    expect(typeof hash).toBe('string');
+    expect(hash.length).toBeGreaterThan(0);
+    // No matching proposal exists, so nothing to assert on vote tallies —
+    // the important behavior is that it doesn't throw and still returns a hash.
+  });
+
+  it('castVote skips the on-chain attempt entirely when signerAddress is empty', async () => {
+    vi.useFakeTimers();
+    const promise = castVote(1, 'For', '', mockSignTx);
+    vi.runAllTimers();
+    const hash = await promise;
+    expect(typeof hash).toBe('string');
+    expect(hash.length).toBeGreaterThan(0);
+  });
+
+  it('executeProposal skips the on-chain attempt entirely when signerAddress is empty', async () => {
+    vi.useFakeTimers();
+    const promise = executeProposal(6, '', mockSignTx);
+    vi.runAllTimers();
+    const hash = await promise;
+    expect(typeof hash).toBe('string');
+    expect(hash.length).toBeGreaterThan(0);
   });
 
   it('refuses an execution with no connected wallet', async () => {

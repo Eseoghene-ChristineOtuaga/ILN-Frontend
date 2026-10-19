@@ -12,7 +12,7 @@ const meta = {
   argTypes: {
     status: {
       control: 'select',
-      options: ['loading', 'stale', 'empty', 'unauthorized', 'malformed'],
+      options: ['loading', 'stale', 'empty', 'unauthorized', 'malformed', 'unavailable', 'rate-limited'],
     },
     detail: { control: 'text' },
     onRetry: { action: 'retry' },
@@ -48,6 +48,16 @@ export const Unauthorized: Story = {
 /** Malformed — the response could not be parsed into the expected shape. */
 export const Malformed: Story = {
   args: { status: 'malformed' satisfies IndexerBoundaryStatus },
+};
+
+/** Unavailable — indexer service cannot be reached. */
+export const Unavailable: Story = {
+  args: { status: 'unavailable' satisfies IndexerBoundaryStatus },
+};
+
+/** RateLimited — indexer rate limit reached. */
+export const RateLimited: Story = {
+  args: { status: 'rate-limited' satisfies IndexerBoundaryStatus },
 };
 
 /** Loading with a retry affordance (recoverable boundary). */

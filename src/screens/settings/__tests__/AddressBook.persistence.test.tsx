@@ -9,12 +9,14 @@ import React from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import AddressBookPage from '../AddressBook';
+import { currentWalletRecordScope, walletRecordKey } from '@/utils/walletRecordStore';
 
 // vi.mock is hoisted above module-level consts, so the address is hoisted too.
 const { TEST_WALLET } = vi.hoisted(() => ({
   TEST_WALLET: 'GDCXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXABCD',
 }));
-const STORAGE_KEY = `iln-address-book-${TEST_WALLET}`;
+// Seeded at the pre-envelope key; the hook migrates it to the scoped key on load.
+const LEGACY_STORAGE_KEY = `iln-address-book-${TEST_WALLET}`;
 
 vi.mock('@/context/WalletContext', () => ({
   useWallet: () => ({ address: TEST_WALLET }),
@@ -37,13 +39,15 @@ const seedEntries = [
 ];
 
 function storedEntries() {
-  return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '[]');
+  const key = walletRecordKey('address-book', currentWalletRecordScope(TEST_WALLET));
+  const raw = localStorage.getItem(key);
+  return raw ? JSON.parse(raw).data : [];
 }
 
 describe('AddressBookPage inline edit persistence', () => {
   beforeEach(() => {
     localStorage.clear();
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(seedEntries));
+    localStorage.setItem(LEGACY_STORAGE_KEY, JSON.stringify(seedEntries));
   });
 
   it('persists an edited entry to localStorage and shows it after a remount', () => {
@@ -64,7 +68,11 @@ describe('AddressBookPage inline edit persistence', () => {
 
     // Storage holds the new values; id and untouched entries are preserved.
     expect(storedEntries()).toEqual([
-      { id: 'a', address: 'GALICENEWADDRESSAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA6543', nickname: 'Alice Treasury' },
+      {
+        id: 'a',
+        address: 'GALICENEWADDRESSAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA6543',
+        nickname: 'Alice Treasury',
+      },
       seedEntries[1],
     ]);
 

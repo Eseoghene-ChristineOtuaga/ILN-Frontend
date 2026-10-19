@@ -264,5 +264,20 @@
     "select": "Seleccionar idioma",
     "en": "English",
     "es": "Español"
+  },
+  "addressBook": {
+    "recovery": {
+      "title": "Se restableció la libreta de direcciones guardada",
+      "CORRUPT": "No se pudieron leer los datos guardados, así que se eliminaron. Vuelve a añadir tus contactos.",
+      "UNSUPPORTED_VERSION": "Los datos guardados provienen de una versión no compatible de la aplicación, así que se eliminaron.",
+      "TAMPERED": "Los datos guardados no superaron la verificación de integridad y podrían haber sido modificados, así que se eliminaron.",
+      "SCOPE_MISMATCH": "Los datos guardados pertenecen a otra billetera, red o sitio, así que se eliminaron.",
+      "EXPIRED": "Los datos guardados no se usaron durante más tiempo que el periodo de retención, así que se eliminaron.",
+      "INVALID_SHAPE": "Los datos guardados tenían un formato inesperado, así que se eliminaron.",
+      "dismiss": "Descartar"
+    },
+    "errors": {
+      "storageUnavailable": "El almacenamiento del navegador no está disponible, así que no se pueden guardar los cambios de la libreta de direcciones."
+    }
   }
 }

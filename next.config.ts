@@ -1,6 +1,10 @@
 import type { NextConfig } from 'next';
 import withPWA from 'next-pwa';
 import { withSentryConfig } from '@sentry/nextjs';
+import { assertNoPublicIndexerSecrets } from './src/lib/indexer/env-guard';
+
+// Fail the build before Next.js can inline an indexer credential into browser bundles.
+assertNoPublicIndexerSecrets();
 
 const nextConfig: NextConfig & { allowedDevOrigins?: string[] } = {
   reactStrictMode: true,

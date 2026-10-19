@@ -10,6 +10,7 @@ import {
   Address,
 } from '@stellar/stellar-sdk';
 import {
+  CONTRACT_ID,
   GOVERNANCE_CONTRACT_ID,
   ILN_TOKEN_CONTRACT_ID,
   NETWORK_PASSPHRASE,
@@ -23,6 +24,49 @@ import {
   type GovernanceMutationMethod,
   type GovernanceMutationOptions,
 } from '@/lib/governance-tx';
+import { isCancellationError } from '@/lib/transaction-lifecycle';
+import { sep10Session } from '@/lib/sep10Session';
+import {
+  assertGovernanceSimulationPassed,
+  type GovernanceSimulationOutcome,
+} from '@/lib/governance/simulation';
+import {
+  isContractAddress,
+  MAX_TOKEN_DECIMALS,
+  type CreateProposalFormType,
+  type CreateProposalPayload,
+  type ProposalValidationContext,
+} from '@/lib/governance/contract-schema';
+import {
+  fetchChainParameters,
+  toValidationContext,
+  type AcceptedToken,
+  type ProtocolParameters,
+} from '@/lib/governance/chain-parameters';
+import {
+  DEFAULT_LOOKBACK_LEDGERS,
+  fetchConfirmedParameterUpdates,
+  parameterLabel,
+  type ParameterUpdateEvent,
+} from '@/lib/governance/parameter-events';
+import { submitCreateProposal, type CreateProposalStage } from '@/lib/governance/create-proposal';
+import { getApprovedTokenIds, getTokenMetadata } from '@/utils/soroban';
+
+export type { CreateProposalFormType, CreateProposalPayload, AcceptedToken, ProtocolParameters };
+export type { ParameterUpdateEvent, CreateProposalStage };
+export { parameterLabel };
+export {
+  validateProposalPayload,
+  issuesByField,
+  ProposalValidationError,
+} from '@/lib/governance/contract-schema';
+export {
+  toValidationContext,
+  requiredProposerBalance,
+  baseUnitsToTokens,
+  ChainParametersError,
+} from '@/lib/governance/chain-parameters';
+export { CreateProposalError } from '@/lib/governance/create-proposal';
 
 // ─── RPC & Contract helpers ───────────────────────────────────────────────────
 
@@ -424,18 +468,43 @@ export function formatVotingPower(power: number): string {
 const userVotes: Map<number, VoteChoice> = new Map();
 const vetoHistory: VetoRecord[] = [];
 const proposalTxHashes: Map<string, string> = new Map();
+// Confirmed creations only, keyed by proposer + payload, so a double-click
+// after confirmation returns the same on-chain result instead of re-submitting.
 const proposalCreationCache: Map<
   string,
   { txHash: string; proposalId: number; timestamp: number }
+> = new Map();
+// In-flight creations, so concurrent duplicate submissions share one transaction.
+const proposalCreationInFlight: Map<
+  string,
+  Promise<{ txHash: string; proposalId: number }>
 > = new Map();
 
 export function clearGovernanceIdempotencyCache(): void {
   proposalTxHashes.clear();
   proposalCreationCache.clear();
+  proposalCreationInFlight.clear();
 }
 
 export function getUserVote(proposalId: number): VoteChoice | undefined {
   return userVotes.get(proposalId);
+}
+
+/**
+ * Optional, additive hooks for every governance write path.
+ *
+ * Both callbacks are opt-in so existing call sites keep their behaviour:
+ *
+ * - `simulate` runs a Soroban dry-run *before* the wallet prompt. A failed
+ *   simulation throws a typed {@link import('@/lib/governance/simulation').GovernanceSimulationError}
+ *   and neither signs nor mutates (#1063).
+ * - `onConfirmed` runs only after the mutation has completed successfully.
+ *   Query-cache invalidation belongs here so rejected / failed / pending
+ *   writes cannot refresh data (#1065).
+ */
+export interface GovernanceMutationOptions {
+  simulate?: () => Promise<GovernanceSimulationOutcome>;
+  onConfirmed?: (txHash: string) => void | Promise<void>;
 }
 
 // ─── Contract Parsers ─────────────────────────────────────────────────────────
@@ -648,6 +717,26 @@ function encodeProposalValue(payload: CreateProposalPayload): string {
  * A confirmed `create_proposal` that returns nothing parseable is a contract
  * boundary mismatch, not a reason to invent an id — the transaction landed,
  * so the error says so and points at the hash.
+ * Enforce a valid SEP-10 session before any backend-authorized governance or
+ * admin operation. Throws with a typed error code so callers can prompt
+ * reauthentication rather than silently failing.
+ *
+ * #1076: Gate authenticated governance actions
+ */
+function requireSep10Session(signerAddress: string): void {
+  if (!sep10Session.hasValidSession(signerAddress)) {
+    throw new Error(
+      'SEP10_SESSION_REQUIRED: A valid authenticated session is required to perform governance actions. Please reconnect your wallet.'
+    );
+  }
+}
+
+/**
+ * Deterministic stand-in transaction hash derived from the wallet signature.
+ * Replaces the previous `Math.random()` hashes so no fabricated random value
+ * reaches the UI (#1141); the same signed intent always yields the same hash.
+ * Emits a 64-character hex string so it satisfies the standard Stellar
+ * transaction-hash shape enforced by `isValidTxHash` (#1148).
  */
 function parseCreatedProposalId(returnValue?: xdr.ScVal): number {
   if (returnValue) {
@@ -730,6 +819,16 @@ export async function castVote(
 ): Promise<string> {
   const voter = requireSigner(signerAddress, 'cast_vote');
   const cacheKey = `${voter}:vote:${proposalId}`;
+  options: GovernanceMutationOptions = {}
+): Promise<string> {
+  requireSep10Session(signerAddress);
+  // TODO: Replace with actual Soroban transaction once governance contract is deployed
+  // Ref: #111
+  await new Promise((r) => setTimeout(r, 2000));
+
+  const proposal = MOCK_PROPOSALS.find((p) => p.id === proposalId);
+  const cacheKey = `${signerAddress || 'anon'}:vote:${proposalId}`;
+  const previousVote = userVotes.get(proposalId);
 
   // Idempotent replay of an identical, already-confirmed vote: return the
   // settled hash without re-signing or re-submitting (#1146).
@@ -750,10 +849,36 @@ export async function castVote(
     pendingLabel: `cast_vote:${proposalId}`,
     ...options,
   });
+  // Dry-run before the wallet prompt: a failed simulation is rendered to the
+  // user without ever opening the wallet, and nothing is mutated (#1063).
+  if (options.simulate) {
+    await assertGovernanceSimulationPassed(options.simulate);
+  }
+
+  // Signature gate before any mutation: a declined wallet changes nothing (#1144).
+  const signed = await requireGovernanceSignature(
+    `vote:${proposalId}:${choice}:${signerAddress}`,
+    signerAddress,
+    signTx
+  );
+
+  // If user changed their vote, adjust previous choice count
+  if (proposal && previousVote && previousVote !== choice) {
+    const power = 1250;
+    if (previousVote === 'For') {
+      proposal.votesFor = Math.max(0, proposal.votesFor - power);
+    } else if (previousVote === 'Against') {
+      proposal.votesAgainst = Math.max(0, proposal.votesAgainst - power);
+    } else if (previousVote === 'Abstain') {
+      proposal.votesAbstain = Math.max(0, (proposal.votesAbstain ?? 0) - power);
+    }
+  }
 
   // Only a confirmed settlement updates local state (#1142).
   userVotes.set(proposalId, choice);
   proposalTxHashes.set(cacheKey, txHash);
+  // Cache refresh is a confirmed-only concern (#1065).
+  await options.onConfirmed?.(txHash);
   return txHash;
 }
 
@@ -772,6 +897,16 @@ export async function executeProposal(
   options: GovernanceWriteOptions = {}
 ): Promise<string> {
   const caller = requireSigner(signerAddress, 'execute_proposal');
+  options: GovernanceMutationOptions = {}
+): Promise<string> {
+  requireSep10Session(signerAddress);
+  // TODO: Replace with actual Soroban transaction once governance contract is deployed
+  // Ref: #111
+  await new Promise((r) => setTimeout(r, 2000));
+
+  const proposal = MOCK_PROPOSALS.find((p) => p.id === proposalId);
+  if (!proposal) throw new Error('Proposal not found');
+
   const cacheKey = `execute:${proposalId}`;
 
   // Idempotent replay of an already-confirmed execution (#1146).
@@ -786,8 +921,19 @@ export async function executeProposal(
     pendingLabel: `execute_proposal:${proposalId}`,
     ...options,
   });
+  // Simulation fails before signing: no wallet prompt, no status change (#1063).
+  if (options.simulate) {
+    await assertGovernanceSimulationPassed(options.simulate);
+  }
+
+  const executedSigned = await requireGovernanceSignature(
+    `execute:${proposalId}:${signerAddress}`,
+    signerAddress,
+    signTx
+  );
 
   proposalTxHashes.set(cacheKey, txHash);
+  await options.onConfirmed?.(txHash);
   return txHash;
 }
 
@@ -807,6 +953,14 @@ export async function vetoProposal(
   options: GovernanceWriteOptions = {}
 ): Promise<string> {
   const admin = requireSigner(adminAddress, 'veto_proposal');
+  options: GovernanceMutationOptions = {}
+): Promise<string> {
+  requireSep10Session(adminAddress);
+  await new Promise((r) => setTimeout(r, 1200));
+
+  const proposal = MOCK_PROPOSALS.find((p) => p.id === proposalId);
+  if (!proposal) throw new Error('Proposal not found');
+
   const cacheKey = `veto:${proposalId}:${reasonHash}`;
 
   // Idempotent replay of an identical, already-confirmed veto (#1146).
@@ -825,6 +979,17 @@ export async function vetoProposal(
     pendingLabel: `veto_proposal:${proposalId}`,
     ...options,
   });
+  // Simulation fails before signing: no wallet prompt, no veto record (#1063).
+  if (options.simulate) {
+    await assertGovernanceSimulationPassed(options.simulate);
+  }
+
+  // Signature gate before any mutation (#1144).
+  const signed = await requireGovernanceSignature(
+    `veto:${proposalId}:${reasonHash}:${adminAddress}`,
+    adminAddress,
+    signTx
+  );
 
   // Confirmed on-chain: record the settled veto so the detail page can show
   // it before the next contract read completes.
@@ -836,6 +1001,14 @@ export async function vetoProposal(
   });
   proposalTxHashes.set(cacheKey, txHash);
   return txHash;
+  };
+  vetoHistory.unshift(record);
+  proposal.vetoHistory = [record, ...(proposal.vetoHistory ?? [])];
+
+  const vetoTxHash = deriveGovernanceTxHash(signed, `veto:${proposalId}:${reasonHash}`);
+  proposalTxHashes.set(cacheKey, vetoTxHash);
+  await options.onConfirmed?.(vetoTxHash);
+  return vetoTxHash;
 }
 
 export function getVetoHistory(proposalId: number): VetoRecord[] {
@@ -860,6 +1033,23 @@ export async function getVotingPower(address: string): Promise<number> {
   }
 }
 
+/**
+ * Governance-token balance of `address` in base units, for the proposal
+ * creation gate (#1054). Unlike {@link getVotingPower} this throws when the
+ * balance cannot be read, so the UI can say so instead of showing zero.
+ */
+export async function fetchProposerBalance(address: string): Promise<bigint> {
+  const callResult = await server.simulateTransaction(
+    buildTokenReadTransaction(ILN_TOKEN_CONTRACT_ID, 'balance', [
+      Address.fromString(address).toScVal(),
+    ])
+  );
+  if (!rpc.Api.isSimulationSuccess(callResult) || !callResult.result?.retval) {
+    throw new Error('Could not read your ILN balance from the network.');
+  }
+  return BigInt(scValToNative(callResult.result.retval));
+}
+
 export async function getDelegationInfo(address: string): Promise<{
   delegatedTo: string | null;
   delegatedAmount: number;
@@ -879,71 +1069,58 @@ export async function getDelegationInfo(address: string): Promise<{
 
 // ─── Proposal creation ────────────────────────────────────────────────────────
 
-/** The four form-level proposal types exposed in the creation UI */
-export type CreateProposalFormType = 'FeeRate' | 'AddToken' | 'RemoveToken' | 'MaxDiscountRate';
-
-export interface AcceptedToken {
-  address: string;
-  name: string;
-  symbol: string;
+/** Simulate a read-only call and return the decoded value; throws when the read fails. */
+async function readContractValue(contractId: string, method: string): Promise<unknown> {
+  const callResult = await server.simulateTransaction(
+    buildTokenReadTransaction(contractId, method, [])
+  );
+  if (!rpc.Api.isSimulationSuccess(callResult) || !callResult.result?.retval) {
+    const detail = 'error' in callResult && callResult.error ? `: ${String(callResult.error)}` : '';
+    throw new Error(`Read ${method} on ${contractId} failed${detail}`);
+  }
+  return scValToNative(callResult.result.retval);
 }
 
-export interface ProtocolParameters {
-  /** Current protocol fee rate in basis points (e.g. 50 = 0.5%) */
-  feeRateBps: number;
-  /** Current maximum discount rate in basis points (e.g. 500 = 5%) */
-  maxDiscountRateBps: number;
-  /** Tokens currently accepted by the protocol */
-  acceptedTokens: AcceptedToken[];
-  /** Minimum ILN balance required to submit a proposal */
-  minProposalILN: number;
-  /** Minimum quorum threshold in basis points (e.g. 1000 = 10% of total supply) */
-  quorumThresholdBps: number;
+async function fetchAcceptedTokens(): Promise<AcceptedToken[]> {
+  const ids = await getApprovedTokenIds();
+  const metadata = await Promise.all(ids.map((id) => getTokenMetadata(id)));
+  return metadata.map((token) => ({
+    address: token.contractId,
+    name: token.name,
+    symbol: token.symbol,
+    decimals: token.decimals,
+  }));
 }
 
-export interface CreateProposalPayload {
-  formType: CreateProposalFormType;
-  title: string;
-  description: string;
-  /** New basis-point value for FeeRate / MaxDiscountRate proposals */
-  newValueBps?: number;
-  /** Token address for AddToken proposals */
-  tokenAddress?: string;
-  /** Resolved token name (AddToken) */
-  tokenName?: string;
-  /** Token address to remove (RemoveToken) */
-  removeTokenAddress?: string;
+/** Retention window used to discover the latest confirmed rate values (~7 days). */
+const CURRENT_VALUE_LOOKBACK_LEDGERS = 120_960;
+
+async function fetchParameterUpdateEvents(
+  lookbackLedgers: number
+): Promise<ParameterUpdateEvent[]> {
+  const result = await fetchConfirmedParameterUpdates({
+    server,
+    governanceContractId: GOVERNANCE_CONTRACT_ID,
+    protocolContractId: CONTRACT_ID,
+    lookbackLedgers,
+  });
+  return result.events;
 }
-
-// ─── Mock protocol parameter state ───────────────────────────────────────────
-
-const MOCK_PROTOCOL_PARAMS: ProtocolParameters = {
-  feeRateBps: 50, // 0.5%
-  maxDiscountRateBps: 500, // 5%
-  acceptedTokens: [
-    {
-      address: 'CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75',
-      name: 'USD Coin',
-      symbol: 'USDC',
-    },
-    {
-      address: 'CDTKPWPLOURQA2SGTKTUQOWRCBZEORB4BWBOMJ3D3ZTQQSGE5F6JBQLV',
-      name: 'Euro Coin',
-      symbol: 'EURC',
-    },
-  ],
-  minProposalILN: 500,
-  quorumThresholdBps: 1000, // 10%
-};
 
 /**
- * Fetch current on-chain protocol parameters.
- * TODO: Replace with actual Soroban read-only calls once governance contract is deployed.
- * Ref: #111
+ * Current proposal-validation parameters, read from the governance contract,
+ * the ILN token, the invoice contract allowlist and confirmed parameter
+ * events (#1054). Throws `ChainParametersError` when an authoritative read
+ * fails — there is no hard-coded fallback.
  */
 export async function fetchProtocolParameters(): Promise<ProtocolParameters> {
-  await new Promise((r) => setTimeout(r, 400));
-  return { ...MOCK_PROTOCOL_PARAMS };
+  return fetchChainParameters({
+    governanceContractId: GOVERNANCE_CONTRACT_ID,
+    govTokenContractId: ILN_TOKEN_CONTRACT_ID,
+    readContract: readContractValue,
+    getAcceptedTokens: fetchAcceptedTokens,
+    getParameterUpdates: () => fetchParameterUpdateEvents(CURRENT_VALUE_LOOKBACK_LEDGERS),
+  });
 }
 
 /**
@@ -960,8 +1137,10 @@ export async function fetchQuorumThreshold(): Promise<number> {
       return 0;
     }
     const totalSupply = BigInt(scValToNative(callResult.result.retval));
-    const params = await fetchProtocolParameters();
-    return Number((totalSupply * BigInt(params.quorumThresholdBps)) / 10_000n);
+    const quorumBps = BigInt(
+      (await readContractValue(GOVERNANCE_CONTRACT_ID, 'get_min_quorum_bps')) as number
+    );
+    return Number((totalSupply * quorumBps) / 10_000n);
   } catch {
     return 0;
   }
@@ -975,40 +1154,48 @@ export function isValidStellarAddress(address: string): boolean {
 }
 
 /**
- * Validate and look up a token from a Stellar asset contract address.
- * Simulates Soroban read calls (SEP-41 `name` and `symbol`).
- * Returns the resolved AcceptedToken or throws a descriptive error.
+ * Validate and look up a token contract for an AddToken proposal.
+ * Reads SEP-41 `name`, `symbol` and `decimals` from the token contract; the
+ * decimals are required because `add_token` checks them against the token.
+ * Throws a descriptive error for anything that cannot be added.
  */
-export async function lookupToken(address: string): Promise<AcceptedToken> {
+export async function lookupToken(
+  address: string,
+  acceptedTokens?: readonly AcceptedToken[]
+): Promise<AcceptedToken> {
   const trimmed = address.trim();
   if (!isValidStellarAddress(trimmed)) {
     throw new Error('Invalid Stellar address. Must start with G or C and be 56 characters.');
   }
+  if (!isContractAddress(trimmed)) {
+    throw new Error('Only Soroban token contracts (C…) can be added as accepted tokens.');
+  }
 
-  // Check if it's already an accepted token
-  const existing = MOCK_PROTOCOL_PARAMS.acceptedTokens.find((t) => t.address === trimmed);
+  const accepted = acceptedTokens ?? (await fetchAcceptedTokens());
+  const existing = accepted.find((t) => t.address === trimmed);
   if (existing) {
     throw new Error(`${existing.symbol} is already an accepted token.`);
   }
 
   let nameResult: rpc.Api.SimulateTransactionResponse;
   let symbolResult: rpc.Api.SimulateTransactionResponse;
+  let decimalsResult: rpc.Api.SimulateTransactionResponse;
 
   try {
-    [nameResult, symbolResult] = await Promise.all([
+    [nameResult, symbolResult, decimalsResult] = await Promise.all([
       server.simulateTransaction(buildTokenReadTransaction(trimmed, 'name', [])),
       server.simulateTransaction(buildTokenReadTransaction(trimmed, 'symbol', [])),
+      server.simulateTransaction(buildTokenReadTransaction(trimmed, 'decimals', [])),
     ]);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(`Failed to simulate token contract call for ${trimmed}: ${msg}`);
   }
 
-  if ('error' in nameResult && nameResult.error) {
-    throw new Error(String(nameResult.error));
-  }
-  if ('error' in symbolResult && symbolResult.error) {
-    throw new Error(String(symbolResult.error));
+  for (const result of [nameResult, symbolResult, decimalsResult]) {
+    if ('error' in result && result.error) {
+      throw new Error(String(result.error));
+    }
   }
 
   if (!rpc.Api.isSimulationSuccess(nameResult) || !nameResult.result?.retval) {
@@ -1017,16 +1204,28 @@ export async function lookupToken(address: string): Promise<AcceptedToken> {
   if (!rpc.Api.isSimulationSuccess(symbolResult) || !symbolResult.result?.retval) {
     throw new Error(`Failed to simulate token symbol for ${trimmed}`);
   }
+  if (!rpc.Api.isSimulationSuccess(decimalsResult) || !decimalsResult.result?.retval) {
+    throw new Error(`Failed to read token decimals for ${trimmed}`);
+  }
 
   const name = String(scValToNative(nameResult.result.retval));
   const symbol = String(scValToNative(symbolResult.result.retval));
+  const decimals = Number(scValToNative(decimalsResult.result.retval));
+  if (!Number.isInteger(decimals) || decimals < 0 || decimals > MAX_TOKEN_DECIMALS) {
+    throw new Error(`Token ${trimmed} reported invalid decimals.`);
+  }
 
-  return {
-    address: trimmed,
-    name,
-    symbol,
-  };
+  return { address: trimmed, name, symbol, decimals };
 }
+
+export interface CreateProposalOptions extends GovernanceMutationOptions {
+  /** Progress callback for each transaction stage (#1055). */
+  onStage?: (stage: CreateProposalStage) => void;
+  /** Validation context; fetched from the chain when omitted (#1054). */
+  context?: ProposalValidationContext;
+}
+
+const PROPOSAL_IDEMPOTENCY_WINDOW_MS = 30_000;
 
 /**
  * Submits a new governance proposal on-chain and returns the confirmed hash
@@ -1036,6 +1235,10 @@ export async function lookupToken(address: string): Promise<AcceptedToken> {
  * a locally invented id would collide with, or skip, the contract's own
  * sequence. Simulation runs first, so an under-threshold ILN balance or an
  * invalid parameter is reported before the wallet prompt (#1044).
+ * Create a governance proposal on-chain (#1055): validate against the contract
+ * schema (#1056) using chain parameters (#1054), then build, simulate, sign,
+ * submit and confirm `create_proposal`. Resolves with the proposal id the
+ * contract returned. Nothing is mutated locally.
  */
 export async function createProposal(
   payload: CreateProposalPayload,
@@ -1074,118 +1277,65 @@ export async function createProposal(
   proposalCreationCache.set(idempotencyKey, { txHash, proposalId, timestamp: Date.now() });
 
   return { txHash, proposalId };
+  options: CreateProposalOptions = {}
+): Promise<{ txHash: string; proposalId: number }> {
+  requireSep10Session(signerAddress);
+
+  const idempotencyKey = `${signerAddress}:${payload.formType}:${payload.title}:${
+    payload.newValueBps ?? payload.tokenAddress ?? payload.removeTokenAddress ?? ''
+  }`;
+  const cached = proposalCreationCache.get(idempotencyKey);
+  if (cached && Date.now() - cached.timestamp < PROPOSAL_IDEMPOTENCY_WINDOW_MS) {
+    return { txHash: cached.txHash, proposalId: cached.proposalId };
+  }
+  const inFlight = proposalCreationInFlight.get(idempotencyKey);
+  if (inFlight) return inFlight;
+
+  const run = (async () => {
+    // Optional caller-supplied dry-run gate (#1063); the contract simulation
+    // inside submitCreateProposal always runs as well.
+    if (options.simulate) {
+      await assertGovernanceSimulationPassed(options.simulate);
+    }
+    const context = options.context ?? toValidationContext(await fetchProtocolParameters());
+    const created = await submitCreateProposal({
+      payload,
+      proposer: signerAddress,
+      signTx,
+      context,
+      server,
+      governanceContractId: GOVERNANCE_CONTRACT_ID,
+      networkPassphrase: NETWORK_PASSPHRASE,
+      onStage: options.onStage,
+    });
+    proposalCreationCache.set(idempotencyKey, {
+      txHash: created.txHash,
+      proposalId: created.proposalId,
+      timestamp: Date.now(),
+    });
+    await options.onConfirmed?.(created.txHash);
+    return { txHash: created.txHash, proposalId: created.proposalId };
+  })();
+
+  proposalCreationInFlight.set(idempotencyKey, run);
+  try {
+    return await run;
+  } finally {
+    proposalCreationInFlight.delete(idempotencyKey);
+  }
 }
 
-// ─── Parameter change announcements (#153) ────────────────────────────────────
+// ─── Parameter change announcements (#153, #1057) ─────────────────────────────
 
 /**
- * A single applied protocol-parameter change, suitable for surfacing in an
- * announcement banner. Mirrors the data a `ParameterUpdated` contract event
- * would carry.
- */
-export interface ParameterUpdateEvent {
-  /** Stable id used for per-event dismissal (`{proposalId}:{parameter}`). */
-  id: string;
-  /** The governance proposal that enacted this change (for deep-linking). */
-  proposalId: number;
-  /** Raw on-chain parameter key, e.g. `fee_rate_bps`. */
-  parameter: string;
-  /** Human-readable parameter name, e.g. "Protocol fee rate". */
-  label: string;
-  /** Formatted new value as shown on the proposal, e.g. "30 (0.3%)". */
-  newValue: string;
-  /** Unix seconds when the change took effect (proposal execution time). */
-  updatedAt: number;
-}
-
-/** Human-readable labels for known protocol parameters. */
-const PARAMETER_LABELS: Record<string, string> = {
-  fee_rate_bps: 'Protocol fee rate',
-  base_discount_rate: 'Base discount rate',
-  max_discount_rate_bps: 'Maximum discount rate',
-  quorum_threshold_bps: 'Quorum threshold',
-  voting_period_seconds: 'Voting period',
-  accepted_tokens: 'Accepted tokens',
-  min_invoice_amount: 'Minimum invoice amount',
-  reputation_threshold: 'Reputation threshold',
-};
-
-/** Map a raw parameter key to a friendly label, falling back to a prettified key. */
-export function parameterLabel(parameter: string): string {
-  return PARAMETER_LABELS[parameter] ?? parameter.replace(/_/g, ' ');
-}
-
-/**
- * Fetch the protocol parameter changes that have been enacted, newest first.
+ * Protocol parameter changes confirmed on-chain, newest first (#1057).
  *
- * Reads ParameterUpdated events from Horizon governance transactions, falling
- * back to executed proposals with parameterChanges if Horizon yields nothing.
+ * Reads `parameter_updated` and `proposal_executed` contract events through
+ * Soroban RPC. Throws `ParameterEventsError` when RPC cannot answer, so the UI
+ * can show an explicit failure state; nothing is derived from local data.
  */
 export async function fetchParameterUpdates(): Promise<ParameterUpdateEvent[]> {
-  const base = getHorizonBaseUrl();
-  const url = `${base}/transactions?accounts=${encodeURIComponent(GOVERNANCE_CONTRACT_ID)}&order=desc&limit=${GOVERNANCE_PAGE_LIMIT}`;
-  const events: ParameterUpdateEvent[] = [];
-
-  try {
-    let nextUrl = url;
-
-    for (let page = 0; page < GOVERNANCE_MAX_PAGES; page += 1) {
-      const pageResp = await fetchGovernanceTransactionsPage(nextUrl);
-      const records = pageResp._embedded?.records ?? [];
-      if (records.length === 0) break;
-
-      for (const tx of records) {
-        if (tx.successful === false) continue;
-
-        const txEvents = tx._embedded?.records ?? [];
-        for (const evt of txEvents) {
-          const topicName = decodeHexOrUtf8Topic(evt.topics?.[0] ?? evt.type);
-          if (topicName !== 'ParameterUpdated') continue;
-
-          const parameter = decodeHexOrUtf8Topic(evt.topics?.[1]) ?? '';
-          const newValue = decodeHexOrUtf8Topic(evt.topics?.[2]) ?? '';
-          const proposalId = Number(decodeHexOrUtf8Topic(evt.topics?.[3]) ?? 0);
-          const updatedAt = tx.created_at ? Math.floor(Date.parse(tx.created_at) / 1000) : 0;
-
-          events.push({
-            id: `${proposalId}:${parameter}`,
-            proposalId,
-            parameter,
-            label: parameterLabel(parameter),
-            newValue,
-            updatedAt,
-          });
-        }
-      }
-
-      const nextHref = pageResp._links?.next?.href;
-      if (!nextHref) break;
-      nextUrl = nextHref;
-    }
-  } catch {
-    // Fall through to proposal-derived updates below.
-  }
-
-  if (events.length > 0) {
-    return events.sort((a, b) => b.updatedAt - a.updatedAt);
-  }
-
-  // Fallback: derive from executed proposals with parameterChanges.
-  const proposals = await fetchProposals();
-  return proposals
-    .filter((p) => p.status === 'Executed' && p.parameterChanges?.length)
-    .flatMap((p) => {
-      const updatedAt = p.executableAfter ?? p.votingEndsAt;
-      return (p.parameterChanges ?? []).map((change) => ({
-        id: `${p.id}:${change.parameter}`,
-        proposalId: p.id,
-        parameter: change.parameter,
-        label: parameterLabel(change.parameter),
-        newValue: change.newValue,
-        updatedAt,
-      }));
-    })
-    .sort((a, b) => b.updatedAt - a.updatedAt);
+  return fetchParameterUpdateEvents(DEFAULT_LOOKBACK_LEDGERS);
 }
 
 // ─── Multisig Signer Rotation events (#3, #103) ─────────────────────────────

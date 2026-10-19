@@ -1,8 +1,10 @@
-export interface LeaderboardResult<T = unknown[]> {
-  data: T;
-  /** True when the indexer was unreachable (distinct from "no rows"). */
-  unavailable: boolean;
-}
+import {
+  fetchLeaderboard,
+  type LeaderboardResult,
+  type IndexerRequestOptions,
+} from '@/lib/indexer-client';
+
+export type { LeaderboardResult };
 
 /**
  * Fetch the leaderboard from the indexer service. Returns a discriminated result
@@ -14,33 +16,13 @@ export interface LeaderboardResult<T = unknown[]> {
  */
 export async function getLeaderboard<T = unknown[]>(
   type: string,
-  period: string
+  period: string,
+  options?: IndexerRequestOptions
 ): Promise<LeaderboardResult<T>> {
   const indexerUrl = process.env.INDEXER_URL;
-  const apiKey = process.env.INDEXER_API_KEY;
-
   if (!indexerUrl) {
-    return { data: [] as unknown as T, unavailable: false };
+    return { data: [] as unknown as T, unavailable: false, status: 'empty' };
   }
 
-  try {
-    const headers: Record<string, string> = {};
-    if (apiKey) {
-      headers['X-API-Key'] = apiKey;
-    }
-
-    const res = await fetch(`${indexerUrl}/leaderboard?type=${type}&period=${period}`, {
-      cache: 'no-store',
-      headers,
-    });
-
-    if (!res.ok) {
-      throw new Error(`Indexer returned ${res.status}`);
-    }
-
-    return { data: (await res.json()) as T, unavailable: false };
-  } catch (error) {
-    console.error('[LeaderboardAPI] Error fetching leaderboard:', error);
-    return { data: [] as unknown as T, unavailable: true };
-  }
+  return fetchLeaderboard<T>(type, period, options);
 }

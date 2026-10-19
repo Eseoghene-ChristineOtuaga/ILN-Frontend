@@ -45,6 +45,7 @@ The app is a single Next.js project (App Router) that talks directly to Soroban 
 - **Payer workflows** — pay invoices, mark invoices as paid, open disputes, opt into email reminders, and view payer-specific dashboard state.
 - **Analytics & stats** — protocol-wide metrics, volume charts, token breakdowns, dispute rates, yield analytics, freelancer cash-flow analytics, and a leaderboard.
 - **Governance & admin** — create/list/vote on proposals, delegate voting power, manage the token allowlist, and view protocol health and contract version info.
+- **Wallet authentication** — authenticate Freighter wallets through the configured SEP-10 service domain, with replay protection, in-memory bearer sessions, and non-sensitive readiness diagnostics.
 - **Growth & engagement** — referrals, product roadmap, reputation profiles with a score simulator, an in-app notification center, a command palette, onboarding tours, and a PWA offline fallback page.
 - **Internationalization & theming** — multi-locale support via `next-intl`/`i18next`, with light/dark theme support.
 
@@ -139,17 +140,18 @@ The checked-in example ships with safe Stellar Testnet defaults, so local UI dev
 <details>
 <summary><b>Stellar & smart contract configuration</b></summary>
 
-| Variable                               | Default                                                    | Description                                                   |
-| -------------------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------- |
-| `NEXT_PUBLIC_CONTRACT_ID`              | `CD3TE3IAHM737P236XZL2OYU275ZKD6MN7YH7PYYAXYIGEH55OPEWYJC` | Invoice Factoring smart contract ID on Soroban Testnet.       |
-| `NEXT_PUBLIC_NETWORK_PASSPHRASE`       | `Test SDF Network ; September 2015`                        | Stellar network passphrase.                                   |
-| `NEXT_PUBLIC_RPC_URL`                  | `https://soroban-testnet.stellar.org`                      | Soroban RPC endpoint.                                         |
-| `NEXT_PUBLIC_NETWORK_NAME`             | `TESTNET`                                                  | Human-readable network label (`TESTNET`, `MAINNET`, `LOCAL`). |
-| `NEXT_PUBLIC_STELLAR_NETWORK`          | `testnet`                                                  | Network type identifier (`testnet`, `public`).                |
-| `NEXT_PUBLIC_TESTNET_USDC_TOKEN_ID`    | `CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75` | USDC asset contract ID on testnet.                            |
-| `NEXT_PUBLIC_TESTNET_EURC_TOKEN_ID`    | `GDHU6WRG4IEQXM5NZ4BMPKOXHW76MZM4Y2IEMFDVXBSDP6SJY4ITNPP`  | EURC asset contract ID on testnet.                            |
-| `NEXT_PUBLIC_TESTNET_XLM_TOKEN_ID`     | `native-xlm`                                               | Native XLM token identifier.                                  |
-| `NEXT_PUBLIC_GOVERNANCE_ADMIN_ADDRESS` | `GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF` | Fallback admin address for governance parameters.             |
+| Variable                               | Default                                                    | Description                                                    |
+| -------------------------------------- | ---------------------------------------------------------- | -------------------------------------------------------------- |
+| `NEXT_PUBLIC_CONTRACT_ID`              | `CD3TE3IAHM737P236XZL2OYU275ZKD6MN7YH7PYYAXYIGEH55OPEWYJC` | Invoice Factoring smart contract ID on Soroban Testnet.        |
+| `NEXT_PUBLIC_NETWORK_PASSPHRASE`       | `Test SDF Network ; September 2015`                        | Stellar network passphrase.                                    |
+| `NEXT_PUBLIC_RPC_URL`                  | `https://soroban-testnet.stellar.org`                      | Soroban RPC endpoint.                                          |
+| `NEXT_PUBLIC_NETWORK_NAME`             | `TESTNET`                                                  | Human-readable network label (`TESTNET`, `MAINNET`, `LOCAL`).  |
+| `NEXT_PUBLIC_STELLAR_NETWORK`          | `testnet`                                                  | Network type identifier (`testnet`, `public`).                 |
+| `NEXT_PUBLIC_SEP10_HOME_DOMAIN`        | _(unset)_                                                  | Optional SEP-10 home domain; defaults to the browser hostname. |
+| `NEXT_PUBLIC_TESTNET_USDC_TOKEN_ID`    | `CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75` | USDC asset contract ID on testnet.                             |
+| `NEXT_PUBLIC_TESTNET_EURC_TOKEN_ID`    | `GDHU6WRG4IEQXM5NZ4BMPKOXHW76MZM4Y2IEMFDVXBSDP6SJY4ITNPP`  | EURC asset contract ID on testnet.                             |
+| `NEXT_PUBLIC_TESTNET_XLM_TOKEN_ID`     | `native-xlm`                                               | Native XLM token identifier.                                   |
+| `NEXT_PUBLIC_GOVERNANCE_ADMIN_ADDRESS` | `GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF` | Fallback admin address for governance parameters.              |
 
 </details>
 
@@ -173,22 +175,32 @@ See [docs/feature-flags.md](docs/feature-flags.md) for the full reference, inclu
 <details>
 <summary><b>Indexer, notifications & email (server / cron)</b></summary>
 
-| Variable                               | Description                                                                                |
-| -------------------------------------- | ------------------------------------------------------------------------------------------ |
-| `NEXT_PUBLIC_INDEXER_API_URL`          | Indexer REST API base URL (activity feed, analytics charts).                               |
-| `NEXT_PUBLIC_INDEXER_WS_URL`           | Indexer WebSocket URL for real-time updates.                                               |
-| `INDEXER_URL`                          | Server-side indexer URL (leaderboard, server functions).                                   |
-| `NOTIFICATION_API`                     | External backend base URL for notifications.                                               |
-| `NEXT_PUBLIC_SUPABASE_URL`             | Supabase project URL.                                                                      |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY`        | Supabase anonymous (browser-safe) key.                                                     |
-| `SUPABASE_SERVICE_ROLE_KEY`            | Server-only key used by the reminder cron to bypass RLS.                                   |
-| `RESEND_API_KEY`                       | Resend API key used to send payer reminder emails.                                         |
-| `CRON_SECRET`                          | Secret used to authorize `GET /api/reminders` (the cron trigger).                          |
-| `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` | WalletConnect project ID, from [cloud.walletconnect.com](https://cloud.walletconnect.com). |
+| Variable                               | Description                                                                                       |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `NEXT_PUBLIC_INDEXER_API_URL`          | Deprecated: read server-side only as a fallback for `INDEXER_URL`.                                |
+| `NEXT_PUBLIC_INDEXER_WS_URL`           | Indexer WebSocket URL for real-time updates.                                                      |
+| `INDEXER_URL`                          | Server-only indexer base URL. The browser reaches it only via `/api/indexer/*`.                   |
+| `INDEXER_API_KEY`                      | Server-only bearer credential for the indexer. Never use a `NEXT_PUBLIC_` name (the build fails). |
+| `INDEXER_TIMEOUT_MS`                   | Upstream indexer timeout in ms (default `8000`, clamped 1000–30000).                              |
+| `INDEXER_API_VERSION_POLICY`           | `strict` (default) requires `X-Indexer-Api-Version: 1.x`; `allow-missing` only for rollout.       |
+| `INDEXER_STALE_AFTER_SECONDS`          | Age after which indexer data is shown as stale (default `300`).                                   |
+| `NOTIFICATION_API`                     | External backend base URL for notifications.                                                      |
+| `NEXT_PUBLIC_SUPABASE_URL`             | Supabase project URL.                                                                             |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY`        | Supabase anonymous (browser-safe) key.                                                            |
+| `SUPABASE_SERVICE_ROLE_KEY`            | Server-only key used by the reminder cron to bypass RLS.                                          |
+| `RESEND_API_KEY`                       | Resend API key used to send payer reminder emails.                                                |
+| `CRON_SECRET`                          | Secret used to authorize `GET /api/reminders` (the cron trigger).                                 |
+| `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` | WalletConnect project ID, from [cloud.walletconnect.com](https://cloud.walletconnect.com).        |
 
 Local UI development works fine without these — they only matter when exercising Supabase-backed reminders, email delivery, or WalletConnect. See [docs/supabase-setup.md](docs/supabase-setup.md) for the reminder schema.
 
 </details>
+
+### SEP-10 wallet authentication
+
+Wallet authentication uses `NEXT_PUBLIC_SEP10_HOME_DOMAIN` when configured, otherwise the actual browser hostname, and reads that service domain's `/.well-known/stellar.toml` `SIGNING_KEY` and `WEB_AUTH_ENDPOINT`. The browser validates the signed challenge against the active wallet, service domain, web-auth domain, and configured Stellar network before signing and exchanging it. A missing or invalid domain configuration is an explicit error; the client does not fall back to a fabricated endpoint.
+
+Authentication is currently available with Freighter. The returned bearer token remains in memory, is not written to browser storage, and is discarded when the wallet disconnects or changes. Authenticated API calls should use `authenticatedRequest` from `useWallet()` so expiry, 401, and 403 responses remain distinguishable. Requests are restricted to the exact HTTPS origin advertised by the SEP-10 endpoint, and redirects are rejected. The wallet menu displays the configured domain, network, token expiry, and latest auth-server health result.
 
 <details>
 <summary><b>App metadata & GitHub feedback integration</b></summary>
