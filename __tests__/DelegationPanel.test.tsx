@@ -18,11 +18,35 @@ vi.mock('@/utils/federation', () => ({
   resolveFederatedAddress: vi.fn(),
 }));
 
+let mockDelegationState: {
+  delegatedTo: string | null;
+  delegatedAmount: number;
+  incomingDelegations: number;
+} = {
+  delegatedTo: null,
+  delegatedAmount: 0,
+  incomingDelegations: 450,
+};
+
 vi.mock('@/utils/governance', () => ({
   // Relaxed so the panel's demo "known delegators" (short placeholder ids like
   // `GABC123...`) still resolve and can trigger the cycle check.
   isValidStellarAddress: vi.fn((addr: string) => addr.startsWith('G') && addr.length >= 8),
-  getVotingPower: vi.fn().mockResolvedValue(1250),
+  getVotingPower: vi.fn().mockResolvedValue(1700),
+  getDelegationInfo: vi.fn(async (addr: string) => {
+    if (addr === 'GABC123...') {
+      return { delegatedTo: 'GUSER123', delegatedAmount: 100, incomingDelegations: 0 };
+    }
+    return mockDelegationState;
+  }),
+  delegateVotingPower: vi.fn(async (delegateAddr: string | null) => {
+    mockDelegationState = {
+      delegatedTo: delegateAddr,
+      delegatedAmount: delegateAddr ? 1250 : 0,
+      incomingDelegations: 450,
+    };
+    return '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+  }),
 }));
 
 describe('DelegationPanel', () => {
@@ -30,9 +54,21 @@ describe('DelegationPanel', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockDelegationState = {
+      delegatedTo: null,
+      delegatedAmount: 0,
+      incomingDelegations: 450,
+    };
     (useWallet as any).mockReturnValue({
       address: 'GUSER123',
       isConnected: true,
+      signTx: vi.fn(),
+    });
+    mockExecute.mockImplementation(async (action) => {
+      if (typeof action === 'function') {
+        await action();
+      }
+      return true;
     });
     (useTransaction as any).mockReturnValue({
       execute: mockExecute,

@@ -17,13 +17,24 @@ import { MOCK_PROPOSALS } from '../governance';
 let sessionCounter = 0;
 let votingPowerSpy: ReturnType<typeof vi.spyOn> | null = null;
 
+function getInvokedMethod(tx: any): string | null {
+  const op = tx?.operations?.[0];
+  if (!op) return null;
+  if (op.function) return String(op.function);
+  try {
+    return op.func?.invokeContract?.()?.functionName?.()?.toString?.() ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export function stubDefaultVotingPower(power = 1250n): void {
   if (votingPowerSpy) return;
   votingPowerSpy = vi
     .spyOn(rpc.Server.prototype, 'simulateTransaction')
     .mockImplementation(async (tx: any) => {
-      const op = tx?.operations?.[0];
-      if (op?.function === 'get_voting_power') {
+      const method = getInvokedMethod(tx);
+      if (method === 'get_voting_power') {
         return {
           transactionData: {},
           minResourceFee: '100',
@@ -78,7 +89,7 @@ export function restoreDefaultVotingPower(): void {
 
 /** Establish a valid session for `accountId` (defaults to a fixed test account). */
 export function establishGovernanceTestSession(
-  accountId = 'GABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+  accountId = 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF',
   defaultVotingPower = 1250n
 ): void {
   sessionCounter += 1;

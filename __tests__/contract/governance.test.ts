@@ -52,10 +52,12 @@ const mockSignTx = vi.fn(async (_xdr: string) => 'signedXDR');
 describe('governance – castVote', () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    establishGovernanceTestSession(SIGNER);
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    clearGovernanceTestSession();
   });
 
   it('returns a transaction hash string', async () => {
@@ -302,6 +304,38 @@ describe('governance – createProposal', () => {
 });
 
 describe('governance – stateful write paths', () => {
+  let rpcStub: ReturnType<typeof stubProposalRpc>;
+
+  beforeEach(() => {
+    clearGovernanceIdempotencyCache();
+    establishGovernanceTestSession(SIGNER);
+    rpcStub = stubProposalRpc({ proposalId: 88 });
+    const idx = MOCK_PROPOSALS.findIndex((p) => p.id === 88);
+    if (idx >= 0) MOCK_PROPOSALS.splice(idx, 1);
+    MOCK_PROPOSALS.push({
+      id: 88,
+      title: 'Isolated vote assertion',
+      description: 'Uses a fresh proposal to avoid prior test state drift.',
+      type: 'ParameterUpdate',
+      status: 'Active',
+      proposer: SIGNER,
+      createdAt: Date.now(),
+      votingStartsAt: Date.now(),
+      votingEndsAt: Date.now() + 86400,
+      votesFor: 0,
+      votesAgainst: 0,
+      votesAbstain: 0,
+      quorumRequired: 100_000,
+    });
+  });
+
+  afterEach(() => {
+    rpcStub.restore();
+    clearGovernanceTestSession();
+    const idx = MOCK_PROPOSALS.findIndex((p) => p.id === 88);
+    if (idx >= 0) MOCK_PROPOSALS.splice(idx, 1);
+  });
+
   it('updates the right vote bucket and persists userVote for the proposal', async () => {
     vi.useFakeTimers();
     const proposalPromise = createProposal(
@@ -312,7 +346,8 @@ describe('governance – stateful write paths', () => {
         newValueBps: 75,
       },
       SIGNER,
-      mockSignTx
+      passthroughSignTx,
+      { context: PROPOSAL_CONTEXT }
     );
     await vi.runAllTimersAsync();
     const proposed = await proposalPromise;
@@ -592,10 +627,13 @@ describe('governance – mock-backing detection', () => {
   it('castVote (#839): tx hash provenance and signTx usage', async () => {
     const signTx = vi.fn(async (_xdr: string) => 'signedXDR');
     const report = await detectMockBacking({
-      run: () => settle(castVote(1, 'For', SIGNER, signTx)),
+      run: () => {
+        establishGovernanceTestSession(SIGNER);
+        return settle(castVote(1, 'For', SIGNER, signTx));
+      },
       boundaries: { signTx },
     });
-    expectMockBackingStatus('castVote', report, 'mock');
+    expectMockBackingStatus('castVote', report, 'real');
   });
 
   it('createProposal (#841): tx hash provenance and signTx usage', async () => {

@@ -45,13 +45,13 @@ function stellarRpcResponse(method: string) {
 
   if (method === 'simulateTransaction') {
     return {
-      transactionData: 'AAAA',
+      transactionData: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
       minResourceFee: '100',
       events: [],
       results: [
         {
           auth: [],
-          xdr: 'AAAA',
+          xdr: 'AAAACgAAAAAAAAAAAAAAAAAABOI=',
         },
       ],
       fixture: contractReadFixtures,

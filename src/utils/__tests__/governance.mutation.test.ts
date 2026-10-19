@@ -53,6 +53,7 @@ import {
   type CreateProposalPayload,
 } from '../governance';
 import {
+  Address,
   scValToNative,
   nativeToScVal,
   rpc,
@@ -77,7 +78,7 @@ import {
 } from './helpers/proposalRpc';
 
 const signTx = vi.fn(async (xdr: string) => `signed-${xdr}`);
-const SIGNER = 'GABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+const SIGNER = PROPOSER;
 
 // Regression guard: ensures sign, submit and confirm never return a mock-random
 // fallback. A hash that starts with "unsigned:" means no wallet was involved,
@@ -168,9 +169,7 @@ describe('governance.castVote (critical path)', () => {
       .spyOn(rpc.Server.prototype, 'simulateTransaction')
       .mockRejectedValueOnce(new Error('Network transport failure'));
 
-    await expect(castVote(1, 'For', SIGNER, signTx)).rejects.toThrow(
-      /VOTING_POWER_UNAVAILABLE/
-    );
+    await expect(castVote(1, 'For', SIGNER, signTx)).rejects.toThrow(/VOTING_POWER_UNAVAILABLE/);
     expect(signTx).not.toHaveBeenCalled();
     mockSimulate.mockRestore();
   });
@@ -186,9 +185,7 @@ describe('governance.castVote (critical path)', () => {
         result: { retval: nativeToScVal(0n, { type: 'i128' }) },
       } as any);
 
-    await expect(castVote(1, 'For', SIGNER, signTx)).rejects.toThrow(
-      /VOTING_POWER_UNAVAILABLE/
-    );
+    await expect(castVote(1, 'For', SIGNER, signTx)).rejects.toThrow(/VOTING_POWER_UNAVAILABLE/);
     expect(signTx).not.toHaveBeenCalled();
     mockSimulate.mockRestore();
   });
@@ -378,11 +375,9 @@ describe('governance.vetoProposal', () => {
 
 describe('governance.getVotingPower', () => {
   it('fails closed with a typed error when voting power read fails (#1049)', async () => {
-    const mockSimulate = vi
-      .spyOn(rpc.Server.prototype, 'simulateTransaction')
-      .mockResolvedValueOnce({
-        error: 'Simulation failed: host error',
-      } as any);
+    const mockSimulate = vi.spyOn(rpc.Server.prototype, 'simulateTransaction').mockResolvedValue({
+      error: 'Simulation failed: host error',
+    } as any);
 
     await expect(getVotingPower(SIGNER)).rejects.toThrow(VotingPowerError);
     await expect(getVotingPower(SIGNER)).rejects.toThrow(/VOTING_POWER_UNAVAILABLE/);
@@ -411,9 +406,12 @@ describe('governance.getVotingPower', () => {
     expect(mockSimulate).toHaveBeenCalledTimes(1);
     const tx = mockSimulate.mock.calls[0][0] as any;
     const op = tx.operations[0];
-    expect(op.type).toBe('invokeContractFunction');
-    expect(op.contract).toBe(GOVERNANCE_CONTRACT_ID);
-    expect(op.function).toBe('get_voting_power');
+    const func = op.func?.invokeContract?.();
+    const funcName = func ? func.functionName().toString() : op.function;
+    const contract = func ? Address.fromScAddress(func.contractAddress()).toString() : op.contract;
+    expect(['invokeHostFunction', 'invokeContractFunction']).toContain(op.type);
+    expect(contract).toBe(GOVERNANCE_CONTRACT_ID);
+    expect(funcName).toBe('get_voting_power');
     expect(power).toBe(2500);
     mockSimulate.mockRestore();
   });

@@ -473,6 +473,7 @@ const proposalCreationInFlight: Map<
 const voteInFlight: Map<string, Promise<string>> = new Map();
 const executeInFlight: Map<string, Promise<string>> = new Map();
 const vetoInFlight: Map<string, Promise<string>> = new Map();
+const delegateInFlight: Map<string, Promise<string>> = new Map();
 
 export function clearGovernanceIdempotencyCache(): void {
   proposalTxHashes.clear();
@@ -481,6 +482,7 @@ export function clearGovernanceIdempotencyCache(): void {
   voteInFlight.clear();
   executeInFlight.clear();
   vetoInFlight.clear();
+  delegateInFlight.clear();
 }
 
 export function getUserVote(proposalId: number): VoteChoice | undefined {
@@ -489,7 +491,10 @@ export function getUserVote(proposalId: number): VoteChoice | undefined {
 
 export class VotingPowerError extends Error {
   readonly code = 'VOTING_POWER_UNAVAILABLE';
-  constructor(message: string, readonly cause?: unknown) {
+  constructor(
+    message: string,
+    override readonly cause?: unknown
+  ) {
     super(`VOTING_POWER_UNAVAILABLE: ${message}`);
     this.name = 'VotingPowerError';
   }
@@ -823,7 +828,8 @@ export async function castVote(
     if (proposal && previousVote !== choice) {
       if (choice === 'For') proposal.votesFor += effectivePower;
       else if (choice === 'Against') proposal.votesAgainst += effectivePower;
-      else if (choice === 'Abstain') proposal.votesAbstain = (proposal.votesAbstain ?? 0) + effectivePower;
+      else if (choice === 'Abstain')
+        proposal.votesAbstain = (proposal.votesAbstain ?? 0) + effectivePower;
     }
 
     // Deterministic hash rooted in the collected signature; cached so an
@@ -1008,21 +1014,210 @@ export async function fetchProposerBalance(address: string): Promise<bigint> {
   return BigInt(scValToNative(callResult.result.retval));
 }
 
-export async function getDelegationInfo(address: string): Promise<{
+export class DelegationError extends Error {
+  readonly code = 'DELEGATION_UNAVAILABLE';
+  constructor(
+    message: string,
+    override readonly cause?: unknown
+  ) {
+    super(`DELEGATION_UNAVAILABLE: ${message}`);
+    this.name = 'DelegationError';
+  }
+}
+
+export interface DelegationInfo {
   delegatedTo: string | null;
   delegatedAmount: number;
   incomingDelegations: number;
-}> {
-  // TODO: Replace with actual Soroban delegation reads once the governance
-  // contract exposes them (Ref: #111). Until then, report no delegation rather
-  // than inventing per-address or randomized delegation figures that would
-  // otherwise reach the voting-power UI.
-  void address;
+}
+
+/**
+ * Normalizes a delegated Stellar/Soroban address from contract responses.
+ * Returns a valid 56-character strkey (G... or C...) or null if not set/empty.
+ */
+export function normalizeDelegatedAddress(raw: unknown): string | null {
+  if (!raw) return null;
+  let str: string;
+  if (typeof raw === 'object' && raw !== null && 'toString' in raw) {
+    str = (raw as { toString: () => string }).toString().trim();
+  } else if (typeof raw === 'string') {
+    str = raw.trim();
+  } else {
+    return null;
+  }
+  if (!str || str.toLowerCase() === 'none') return null;
+  if (!isValidStellarAddress(str)) return null;
+  return str;
+}
+
+/**
+ * Normalizes an integer unit amount returned from Soroban responses into whole tokens.
+ * Handles bigint, number, string, and i128 base units safely.
+ */
+export function normalizeDelegatedAmount(raw: unknown, decimals = 7): number {
+  if (raw === null || raw === undefined) return 0;
+  let big: bigint;
+  try {
+    if (typeof raw === 'bigint') {
+      big = raw;
+    } else if (typeof raw === 'number') {
+      if (!Number.isFinite(raw)) return 0;
+      big = BigInt(Math.floor(raw));
+    } else if (typeof raw === 'string') {
+      const trimmed = raw.trim();
+      if (!trimmed || !/^-?\d+$/.test(trimmed)) return 0;
+      big = BigInt(trimmed);
+    } else {
+      return 0;
+    }
+  } catch {
+    return 0;
+  }
+  if (big <= 0n) return 0;
+
+  const scale = 10n ** BigInt(decimals);
+  if (big >= scale && big % scale === 0n) {
+    const whole = big / scale;
+    if (whole <= BigInt(Number.MAX_SAFE_INTEGER)) {
+      return Number(whole);
+    }
+  }
+  if (big <= BigInt(Number.MAX_SAFE_INTEGER)) {
+    return Number(big);
+  }
+  return Number(big / scale);
+}
+
+export function parseDelegationInfoFromNative(native: unknown): DelegationInfo {
+  if (!native || typeof native !== 'object') {
+    return {
+      delegatedTo: null,
+      delegatedAmount: 0,
+      incomingDelegations: 0,
+    };
+  }
+
+  if (Array.isArray(native)) {
+    const delegatedTo = normalizeDelegatedAddress(native[0]);
+    const delegatedAmount = delegatedTo ? normalizeDelegatedAmount(native[1]) : 0;
+    const incomingDelegations = normalizeDelegatedAmount(native[2]);
+    return { delegatedTo, delegatedAmount, incomingDelegations };
+  }
+
+  const obj = native as Record<string, unknown>;
+  const rawDelegate = obj.delegate ?? obj.delegated_to ?? obj.delegatedTo ?? obj.to;
+  const rawAmount = obj.amount ?? obj.delegated_amount ?? obj.delegatedAmount;
+  const rawIncoming =
+    obj.incoming ??
+    obj.incoming_delegations ??
+    obj.incomingDelegations ??
+    obj.incoming_amount ??
+    obj.incomingAmount;
+
+  const delegatedTo = normalizeDelegatedAddress(rawDelegate);
+  const delegatedAmount = delegatedTo ? normalizeDelegatedAmount(rawAmount) : 0;
+  const incomingDelegations = normalizeDelegatedAmount(rawIncoming);
+
   return {
-    delegatedTo: null,
-    delegatedAmount: 0,
-    incomingDelegations: 0,
+    delegatedTo,
+    delegatedAmount,
+    incomingDelegations,
   };
+}
+
+/**
+ * Queries current vote delegation status from the governance contract authority (#111).
+ * Returns contract-backed delegation data or throws DelegationError if unavailable.
+ */
+export async function getDelegationInfo(address: string): Promise<DelegationInfo> {
+  if (!address || !isValidStellarAddress(address)) {
+    throw new DelegationError('Invalid or missing Stellar address for delegation query');
+  }
+
+  let callResult: rpc.Api.SimulateTransactionResponse;
+  try {
+    const params: xdr.ScVal[] = [Address.fromString(address).toScVal()];
+    callResult = await server.simulateTransaction(
+      buildGovernanceReadTransaction('get_delegation', params)
+    );
+  } catch (err) {
+    throw new DelegationError('Failed to simulate delegation read on governance contract', err);
+  }
+
+  if (!rpc.Api.isSimulationSuccess(callResult)) {
+    throw new DelegationError(
+      'Governance authority returned an unsuccessful simulation for delegation'
+    );
+  }
+
+  if (!callResult.result?.retval) {
+    return {
+      delegatedTo: null,
+      delegatedAmount: 0,
+      incomingDelegations: 0,
+    };
+  }
+
+  const native = scValToNative(callResult.result.retval);
+  return parseDelegationInfoFromNative(native);
+}
+
+/**
+ * Delegate voting power to another address or remove delegation (when delegateAddress is null).
+ * Signs through the wallet and derives a deterministic transaction hash.
+ */
+export async function delegateVotingPower(
+  delegateAddress: string | null,
+  signerAddress: string,
+  signTx: (xdr: string) => Promise<string>,
+  options: GovernanceMutationOptions = {}
+): Promise<string> {
+  requireSep10Session(signerAddress);
+
+  if (!signerAddress || !isValidStellarAddress(signerAddress)) {
+    throw new DelegationError('Invalid signer address for delegation');
+  }
+
+  const normalizedDelegate =
+    delegateAddress && isValidStellarAddress(delegateAddress) ? delegateAddress : null;
+
+  if (delegateAddress !== null && delegateAddress !== undefined && delegateAddress !== '') {
+    if (!isValidStellarAddress(delegateAddress)) {
+      throw new DelegationError('Invalid delegate address');
+    }
+    if (delegateAddress === signerAddress) {
+      throw new DelegationError('Cannot delegate voting power to yourself');
+    }
+  }
+
+  const intent = normalizedDelegate
+    ? `delegate:${signerAddress}:${normalizedDelegate}`
+    : `undelegate:${signerAddress}`;
+  const cacheKey = `${signerAddress}:delegation`;
+  const inFlightKey = `${signerAddress}:${intent}`;
+
+  const inFlight = delegateInFlight.get(inFlightKey);
+  if (inFlight) return inFlight;
+
+  const run = (async () => {
+    if (options.simulate) {
+      await assertGovernanceSimulationPassed(options.simulate);
+    }
+
+    const signed = await requireGovernanceSignature(intent, signerAddress, signTx);
+    const txHash = deriveGovernanceTxHash(signed, intent);
+    proposalTxHashes.set(cacheKey, txHash);
+
+    await options.onConfirmed?.(txHash);
+    return txHash;
+  })();
+
+  delegateInFlight.set(inFlightKey, run);
+  try {
+    return await run;
+  } finally {
+    delegateInFlight.delete(inFlightKey);
+  }
 }
 
 // ─── Proposal creation ────────────────────────────────────────────────────────
