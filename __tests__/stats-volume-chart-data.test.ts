@@ -37,10 +37,10 @@ describe('parseContractStatsForStackedBar', () => {
   it('uses only the last N days for the selected range', () => {
     const days = Array.from({ length: 10 }, (_, i) => {
       const day = String(i + 1).padStart(2, '0');
-      return makeDay(`2025-06-${day}`, { volume_usd: 10, usdc: 1 });
+      return makeDay(`2025-06-${day}`, { volume_usd: 1, usdc: 1 });
     });
     const result = parseContractStatsForStackedBar(days, 30);
-    expect(result.totalVolumeUsd).toBe(100);
+    expect(result.totalVolumeUsd).toBe(10);
     expect(result.weeklyBars.length).toBeGreaterThan(0);
   });
 
@@ -69,8 +69,8 @@ describe('parseContractStatsForStackedBar', () => {
 
   it('sums volume_usd across the period for the summary total', () => {
     const days = [
-      makeDay('2025-06-01', { volume_usd: 100 }),
-      makeDay('2025-06-02', { volume_usd: 50 }),
+      makeDay('2025-06-01', { volume_usd: 100, usdc: 100 }),
+      makeDay('2025-06-02', { volume_usd: 50, usdc: 50 }),
     ];
     expect(parseContractStatsForStackedBar(days, 90).totalVolumeUsd).toBe(150);
   });
@@ -78,7 +78,7 @@ describe('parseContractStatsForStackedBar', () => {
   it('respects a 90-day window when more than 90 days are provided', () => {
     const days = Array.from({ length: 100 }, (_, i) => {
       const day = String((i % 28) + 1).padStart(2, '0');
-      return makeDay(`2025-01-${day}`, { volume_usd: 1 });
+      return makeDay(`2025-01-${day}`, { volume_usd: 1, usdc: 1 });
     });
     const result = parseContractStatsForStackedBar(days, 90);
     expect(result.totalVolumeUsd).toBe(90);
@@ -91,5 +91,16 @@ describe('parseContractStatsForStackedBar', () => {
     const result = parseContractStatsForStackedBar(days, 30);
     expect(result.weeklyBars[0]!.EURC).toBeCloseTo(10 * TOKEN_USD_RATES.EURC, 5);
     expect(result.weeklyBars[0]!.XLM).toBeCloseTo(100 * TOKEN_USD_RATES.XLM, 5);
+  });
+
+  it('derives the chart total from the same token units as the bars', () => {
+    const result = parseContractStatsForStackedBar(
+      [makeDay('2025-06-02', { volume_usd: 999, usdc: 10 })],
+      30
+    );
+
+    expect(result.totalVolumeUsd).toBe(10);
+    expect(result.sourceTotalVolumeUsd).toBe(999);
+    expect(result.reconciliationDeltaUsd).toBe(-989);
   });
 });
