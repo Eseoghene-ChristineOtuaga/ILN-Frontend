@@ -3,6 +3,7 @@ import { fetchProtocolParameters } from '@/utils/governance';
 import { TESTNET_USDC_TOKEN_ID, TESTNET_EURC_TOKEN_ID, TESTNET_XLM_TOKEN_ID } from '@/constants';
 import { fetchProtocolContractEvents } from '@/lib/fetch-protocol-contract-events';
 import { computeDisputeRateMetrics, type DisputeRateMetrics } from '@/utils/dispute-rate';
+import { createFinancialProvenance, type FinancialProvenance } from '@/utils/financial-display';
 
 const FUNDED_STATUSES = new Set(['Funded', 'PartiallyFunded', 'Paid', 'Defaulted']);
 
@@ -39,6 +40,7 @@ export interface ContractStats {
   volume_by_token: TokenVolume[];
   daily_volume: DailyVolumeBucket[];
   dispute_rate: DisputeRateMetrics;
+  financial_provenance?: FinancialProvenance;
 }
 
 interface TokenInfo {
@@ -157,5 +159,7 @@ export async function get_contract_stats(): Promise<ContractStats> {
     volume_by_token,
     daily_volume: buildHistoricalVolume(invoices, 90),
     dispute_rate: computeDisputeRateMetrics(contractEvents),
+    // These are deliberately labelled as reference rates: they are not a live oracle feed.
+    financial_provenance: createFinancialProvenance('reference-rate'),
   };
 }

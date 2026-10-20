@@ -27,6 +27,8 @@ export interface WeeklyVolumeBar {
 export interface StackedVolumeChartData {
   weeklyBars: WeeklyVolumeBar[];
   totalVolumeUsd: number;
+  sourceTotalVolumeUsd: number;
+  reconciliationDeltaUsd: number;
 }
 
 function getWeekStartUtc(dateStr: string): string {
@@ -89,7 +91,18 @@ export function parseContractStatsForStackedBar(
     a.weekStart.localeCompare(b.weekStart)
   );
 
-  const totalVolumeUsd = periodDays.reduce((sum, d) => sum + d.volume_usd, 0);
+  const sourceTotalVolumeUsd = periodDays.reduce(
+    (sum, d) => sum + (Number.isFinite(d.volume_usd) ? d.volume_usd : 0),
+    0
+  );
+  // Derive the displayed total from the same normalized token units as the bars.
+  // This prevents a USD summary field from disagreeing with the chart values.
+  const totalVolumeUsd = weeklyBars.reduce((sum, bar) => sum + bar.USDC + bar.EURC + bar.XLM, 0);
 
-  return { weeklyBars, totalVolumeUsd };
+  return {
+    weeklyBars,
+    totalVolumeUsd,
+    sourceTotalVolumeUsd,
+    reconciliationDeltaUsd: totalVolumeUsd - sourceTotalVolumeUsd,
+  };
 }

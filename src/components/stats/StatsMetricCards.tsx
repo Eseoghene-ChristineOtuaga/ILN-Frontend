@@ -1,20 +1,29 @@
 'use client';
 
-import React from 'react';
+import React, { useState } from 'react';
 import MetricCard from '@/components/analytics/MetricCard';
 import type { ContractStats } from '@/utils/contract-stats';
-
-function formatUsd(value: number): string {
-  if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(2)}M`;
-  if (value >= 1_000) return `$${(value / 1_000).toFixed(1)}K`;
-  return `$${value.toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
-}
+import {
+  createFinancialProvenance,
+  formatFinancialUsd,
+  getRateFreshness,
+} from '@/utils/financial-display';
 
 interface Props {
   stats: ContractStats;
 }
 
 export default function StatsMetricCards({ stats }: Props) {
+  const provenance = stats.financial_provenance ?? createFinancialProvenance('fallback');
+  const [now] = useState(() => Date.now());
+  const freshness = getRateFreshness(provenance.updatedAt, now, provenance.maxAgeSeconds);
+  const freshnessLabel =
+    freshness === 'fresh'
+      ? 'Rate data fresh'
+      : freshness === 'stale'
+        ? 'Rate data stale'
+        : 'Rate freshness unknown';
+
   return (
     <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
       <MetricCard
@@ -45,16 +54,16 @@ export default function StatsMetricCards({ stats }: Props) {
         id="stat-total-volume"
         icon="paid"
         label="Total Volume"
-        value={formatUsd(stats.total_volume_usd)}
-        sub="USD-equivalent funded"
+        value={formatFinancialUsd(stats.total_volume_usd)}
+        sub={`${provenance.label} · ${freshnessLabel} · USD-equivalent funded`}
         accent={true}
       />
       <MetricCard
         id="stat-protocol-fees"
         icon="savings"
         label="Protocol Fees Collected"
-        value={formatUsd(stats.total_protocol_fees_usd ?? 0)}
-        sub="Fees collected by protocol"
+        value={formatFinancialUsd(stats.total_protocol_fees_usd)}
+        sub={`${provenance.label} · ${freshnessLabel} · Fees collected by protocol`}
         accent={false}
         tooltip="This fee funds ILN protocol development and the treasury"
         badge={

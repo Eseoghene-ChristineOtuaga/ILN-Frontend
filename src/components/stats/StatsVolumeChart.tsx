@@ -17,6 +17,7 @@ import {
   parseContractStatsForStackedBar,
   type VolumeChartRangeDays,
 } from '@/utils/stats-volume-chart-data';
+import { formatFinancialUsd } from '@/utils/financial-display';
 
 const TOKEN_KEYS = ['USDC', 'EURC', 'XLM'] as const;
 
@@ -26,12 +27,6 @@ const CHART_TICK_STYLE = {
   fontFamily: 'inherit',
 };
 const GRID_STROKE = 'var(--color-outline-variant, #334155)';
-
-function formatUsd(value: number): string {
-  if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(2)}M`;
-  if (value >= 1_000) return `$${(value / 1_000).toFixed(1)}K`;
-  return `$${value.toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
-}
 
 function ChartTooltip({ active, payload, label }: TooltipProps<number, string>) {
   if (!active || !payload?.length) return null;
@@ -49,14 +44,14 @@ function ChartTooltip({ active, payload, label }: TooltipProps<number, string>) 
               <span className="text-xs font-medium text-on-surface">{entry.name}</span>
             </div>
             <span className="text-xs font-bold text-on-surface">
-              {formatUsd(Number(entry.value))}
+              {formatFinancialUsd(Number(entry.value))}
             </span>
           </div>
         ))}
         <div className="my-1 h-px bg-outline-variant/10" />
         <div className="flex items-center justify-between gap-4">
           <span className="text-xs font-bold text-on-surface">Total USD</span>
-          <span className="text-xs font-extrabold text-primary">{formatUsd(total)}</span>
+          <span className="text-xs font-extrabold text-primary">{formatFinancialUsd(total)}</span>
         </div>
       </div>
     </div>
@@ -84,7 +79,7 @@ export default function StatsVolumeChart({ dailyVolume }: Props) {
         <div>
           <h3 className="font-headline text-xl font-bold text-on-surface">Historical Volume</h3>
           <p className="text-sm text-on-surface-variant">
-            Weekly funded volume by token (USD equivalent)
+            Weekly funded volume by token (USD equivalent, normalized from token units)
           </p>
         </div>
         <div className="flex items-center gap-1 p-1 bg-surface-container rounded-xl self-start">
@@ -157,9 +152,12 @@ export default function StatsVolumeChart({ dailyVolume }: Props) {
           Total volume ({rangeDays} days)
         </span>
         <span className="font-headline text-lg font-bold text-primary">
-          {formatUsd(totalVolumeUsd)}
+          {formatFinancialUsd(totalVolumeUsd)}
         </span>
       </div>
+      <p className="text-xs text-on-surface-variant">
+        USD values use reference rates and are reconciled from the token amounts in each bar.
+      </p>
     </div>
   );
 }

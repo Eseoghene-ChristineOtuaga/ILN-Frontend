@@ -2,6 +2,7 @@
 
 import React from 'react';
 import type { TokenVolume } from '@/utils/contract-stats';
+import { formatFinancialUsd } from '@/utils/financial-display';
 
 const TOKEN_ICONS: Record<string, string> = {
   USDC: 'currency_exchange',
@@ -65,10 +66,7 @@ export default function StatsTokenBreakdown({ tokens, totalUsd }: Props) {
                 {token.symbol}
               </p>
               <p className="text-xs text-on-surface-variant">
-                ≈ $
-                {token.amount_usd >= 1_000
-                  ? `${(token.amount_usd / 1_000).toFixed(1)}K`
-                  : token.amount_usd.toLocaleString('en-US', { maximumFractionDigits: 0 })}
+                ≈ {formatFinancialUsd(token.amount_usd)}
               </p>
             </div>
           </div>
