@@ -7,7 +7,6 @@ import Navbar from '@/components/Navbar';
 import VoteSection from '@/components/VoteSection';
 import GovernanceMockStatusBanner from '@/components/governance/GovernanceMockStatusBanner';
 import { GOVERNANCE_ADMIN_ADDRESS } from '@/constants';
-import { useToast } from '@/context/ToastContext';
 import { useWallet } from '@/context/WalletContext';
 import { useDocumentTitle } from '@/hooks/useDocumentTitle';
 import { useTransaction } from '@/hooks/useTransaction';
@@ -187,6 +186,7 @@ function VetoProposalModal({
 export default function ProposalDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const { address, isConnected, connect } = useWallet();
   const { address, isConnected, connect, signTx, walletNetwork } = useWallet();
   const { addToast, updateToast } = useToast();
   const { execute, loading: isVoting } = useTransaction();
@@ -286,6 +286,13 @@ export default function ProposalDetailPage() {
     if (!proposal || !address) return;
 
     setIsExecuting(true);
+    const result = await execute(async (signTx) => executeProposal(proposal.id, address, signTx), {
+      expectedAction: 'execute_proposal',
+      title: 'Executing proposal…',
+      pendingMessage: 'Waiting for wallet signature...',
+      successTitle: 'Proposal executed',
+      successMessage: 'The proposal has been successfully executed.',
+    });
     const result = await execute(
       async (signTx) =>
         executeProposal(proposal.id, address, signTx, {
@@ -322,6 +329,22 @@ export default function ProposalDetailPage() {
 
     isVetoingRef.current = true;
     setIsVetoing(true);
+    // Routed through `execute` so the veto gets the same typed governance
+    // handling as voting and execution: simulation errors surface before the
+    // wallet prompt, and a confirmation timeout is reported as an unknown
+    // outcome rather than a failure (#1044, #1045).
+    const result = await execute(
+      async (signTx) => vetoProposal(proposal.id, vetoReasonHash, address, signTx),
+      {
+        expectedAction: 'veto_proposal',
+        title: 'Vetoing proposal…',
+        pendingMessage: 'Waiting for wallet signature...',
+        successTitle: 'Proposal vetoed',
+        successMessage: 'The proposal has been vetoed on-chain.',
+      }
+    );
+
+    if (result) {
     const toastId = addToast({ type: 'pending', title: 'Vetoing proposal...' });
     try {
       const txHash = await vetoProposal(proposal.id, vetoReasonHash, address, signTx, {
@@ -354,6 +377,10 @@ export default function ProposalDetailPage() {
       setVetoModalOpen(false);
       setVetoReason('');
       setVetoReasonHash('');
+      // Status comes from the contract on reload rather than being set
+      // locally, so the UI cannot show "Vetoed" for a transaction that never
+      // settled.
+      await load();
     } catch (err) {
       updateToast(toastId, {
         type: 'error',
@@ -364,6 +391,7 @@ export default function ProposalDetailPage() {
       isVetoingRef.current = false;
       setIsVetoing(false);
     }
+    setIsVetoing(false);
   };
 
   // ─── Derived state ──────────────────────────────────────────────────────────

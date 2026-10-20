@@ -38,8 +38,17 @@ describe('scanMockInventory', () => {
 
     const castVote = data.functions.find((f: { name: string }) => f.name === 'castVote');
     expect(castVote).toBeDefined();
-    expect(castVote?.status).toBe('Mock');
-    expect(castVote?.trackingIssue).toBe('#839');
+    // Real since #1044/#1045: a signed Soroban cast_vote, simulated before
+    // signing and confirmed under a bounded poll.
+    expect(castVote?.status).toBe('Real');
+    expect(castVote?.trackingIssue).toBe('#1044');
+
+    const createProposal = data.functions.find(
+      (f: { name: string }) => f.name === 'createProposal'
+    );
+    expect(createProposal).toBeDefined();
+    expect(createProposal?.status).toBe('Real');
+    expect(createProposal?.trackingIssue).toBe('#1044');
 
     const delegateVotingPower = data.functions.find(
       (f: { name: string }) => f.name === 'delegateVotingPower'

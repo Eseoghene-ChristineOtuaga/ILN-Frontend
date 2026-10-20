@@ -25,6 +25,19 @@ export const GOVERNANCE_ADMIN_ADDRESS =
   process.env.NEXT_PUBLIC_GOVERNANCE_ADMIN_ADDRESS ||
   'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF';
 export const GOVERNANCE_CONTRACT_ID = process.env.NEXT_PUBLIC_GOVERNANCE_CONTRACT_ID || CONTRACT_ID;
+/**
+ * Whether a governance contract is *explicitly* configured (#1044, #1045).
+ *
+ * {@link GOVERNANCE_CONTRACT_ID} falls back to {@link CONTRACT_ID}, which is
+ * the invoice contract and exposes no governance entry points — every
+ * governance call against it fails with `Error(WasmVm, MissingValue)`. Write
+ * paths check this flag so an unconfigured deployment reports "not
+ * configured" up front instead of prompting for a signature on a transaction
+ * that cannot succeed.
+ */
+export const GOVERNANCE_CONTRACT_CONFIGURED = Boolean(
+  process.env.NEXT_PUBLIC_GOVERNANCE_CONTRACT_ID
+);
 /** ILN governance token contract — used for voting power and quorum calculations. */
 export const ILN_TOKEN_CONTRACT_ID = process.env.NEXT_PUBLIC_ILN_TOKEN_CONTRACT_ID || CONTRACT_ID;
 
@@ -59,11 +72,17 @@ export const INDEXER_DEFAULT_TIMEOUT_MS = 10_000;
 /**
  * Maximum retry attempts for transient indexer failures (#1108).
  */
+export const INDEXER_API_URL =
+  process.env.NEXT_PUBLIC_INDEXER_API_URL || 'https://api.iln.example.com';
 export const INDEXER_DEFAULT_RETRIES = 2;
 
 /**
  * Base backoff in milliseconds for exponential retry (#1108).
  */
+export const INDEXER_SERVER_URL =
+  process.env.INDEXER_URL ||
+  process.env.NEXT_PUBLIC_INDEXER_API_URL ||
+  'https://api.iln.example.com';
 export const INDEXER_DEFAULT_BACKOFF_MS = 300;
 
 /**

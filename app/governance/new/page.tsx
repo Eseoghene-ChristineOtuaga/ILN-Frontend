@@ -98,6 +98,11 @@ function describeSubmitError(error: unknown): string {
 
 export default function NewGovernanceProposalPage() {
   const router = useRouter();
+  const { address, isConnected } = useWallet();
+  const { execute, loading: txLoading, signingModal } = useTransaction();
+  const { tokens } = useApprovedTokens();
+  const { balances, isLoading: balancesLoading } = useBalances(tokens);
+  const { address, isConnected, signTx } = useWallet();
   const { address, isConnected, signTx, walletNetwork } = useWallet();
   const invalidateGovernanceQueries = useInvalidateGovernanceQueries();
 
@@ -332,6 +337,42 @@ export default function NewGovernanceProposalPage() {
     setSubmitting(true);
     setStage(null);
     try {
+      const payload = {
+        formType: formData.formType as CreateProposalFormType,
+        title: formData.title,
+        description:
+          formData.description +
+          `
+
+IPFS Hash: ${ipfsHash}`,
+        newValueBps: formData.newValueBps ? parseInt(formData.newValueBps) : undefined,
+        tokenAddress: resolvedToken?.address,
+        tokenName: resolvedToken?.name,
+        removeTokenAddress: formData.removeTokenAddress,
+      };
+
+      // Routed through `execute` so the proposal is signed by the connected
+      // wallet and its outcome reported through the shared transaction
+      // handling: simulation errors surface before the signature prompt
+      // (#1044) and a confirmation timeout is reported as an unknown outcome
+      // rather than a failure (#1045). The previous identity `signTx` echoed
+      // the XDR back unsigned, which a real network always rejects.
+      const result = await execute(async (signTx) => createProposal(payload, address, signTx), {
+        expectedAction: 'create_proposal',
+        title: 'Submitting proposal…',
+        pendingMessage: 'Waiting for wallet signature...',
+        successTitle: 'Proposal submitted',
+        successMessage: 'Your proposal is now on-chain.',
+      });
+
+      // `execute` has already surfaced any failure; only navigate on a
+      // confirmed proposal.
+      if (result) {
+        router.push(`/governance/${result.proposalId}`);
+      }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      alert(`Failed to create proposal: ${msg}`);
       const { proposalId } = await createProposal(payload, address, signTx, {
         walletNetwork,
         context: toValidationContext(protocolParams),
@@ -726,6 +767,7 @@ export default function NewGovernanceProposalPage() {
           </p>
         )}
       </form>
+      {signingModal}
     </main>
   );
 }
