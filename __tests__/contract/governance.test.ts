@@ -79,6 +79,15 @@ describe('governance – castVote', () => {
       passthroughSignTx(),
       governanceWriteOptions(stub)
     );
+  beforeEach(() => {
+    vi.useFakeTimers();
+    establishGovernanceTestSession(SIGNER);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    clearGovernanceTestSession();
+  });
 
     expect(hash).toBe(stub.issuedHashes[0]);
   });
@@ -371,6 +380,41 @@ describe('governance – stateful write paths', () => {
   it('persists only the confirmed userVote, not a synthesised tally', async () => {
     const stub = createGovernanceRpcStub({ proposalId: 41 });
     const proposed = await createProposal(
+  let rpcStub: ReturnType<typeof stubProposalRpc>;
+
+  beforeEach(() => {
+    clearGovernanceIdempotencyCache();
+    establishGovernanceTestSession(SIGNER);
+    rpcStub = stubProposalRpc({ proposalId: 88 });
+    const idx = MOCK_PROPOSALS.findIndex((p) => p.id === 88);
+    if (idx >= 0) MOCK_PROPOSALS.splice(idx, 1);
+    MOCK_PROPOSALS.push({
+      id: 88,
+      title: 'Isolated vote assertion',
+      description: 'Uses a fresh proposal to avoid prior test state drift.',
+      type: 'ParameterUpdate',
+      status: 'Active',
+      proposer: SIGNER,
+      createdAt: Date.now(),
+      votingStartsAt: Date.now(),
+      votingEndsAt: Date.now() + 86400,
+      votesFor: 0,
+      votesAgainst: 0,
+      votesAbstain: 0,
+      quorumRequired: 100_000,
+    });
+  });
+
+  afterEach(() => {
+    rpcStub.restore();
+    clearGovernanceTestSession();
+    const idx = MOCK_PROPOSALS.findIndex((p) => p.id === 88);
+    if (idx >= 0) MOCK_PROPOSALS.splice(idx, 1);
+  });
+
+  it('updates the right vote bucket and persists userVote for the proposal', async () => {
+    vi.useFakeTimers();
+    const proposalPromise = createProposal(
       {
         formType: 'FeeRate',
         title: 'Isolated vote assertion',
@@ -380,6 +424,8 @@ describe('governance – stateful write paths', () => {
       SIGNER,
       passthroughSignTx(),
       governanceWriteOptions(stub)
+      passthroughSignTx,
+      { context: PROPOSAL_CONTEXT }
     );
 
     const result = await castVote(
@@ -676,6 +722,11 @@ describe('governance – mock-backing detection', () => {
         sendTransaction: stub.sendTransaction,
         getTransaction: stub.getTransaction,
       },
+      run: () => {
+        establishGovernanceTestSession(SIGNER);
+        return settle(castVote(1, 'For', SIGNER, signTx));
+      },
+      boundaries: { signTx },
     });
     expectMockBackingStatus('castVote', report, 'real');
   });

@@ -1,11 +1,15 @@
 'use client';
 
-import React, { useState, useEffect, useMemo } from 'react';
-import { isValidStellarAddress } from '@/utils/governance';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import {
+  isValidStellarAddress,
+  getDelegationInfo,
+  getVotingPower,
+  delegateVotingPower,
+} from '@/utils/governance';
 import { resolveFederatedAddress } from '@/utils/federation';
 import { useWallet } from '@/context/WalletContext';
 import { useTransaction } from '@/hooks/useTransaction';
-import GovernanceMockStatusBanner from '@/components/governance/GovernanceMockStatusBanner';
 import {
   Users,
   UserPlus,
@@ -17,29 +21,72 @@ import {
 } from 'lucide-react';
 
 export const DelegationPanel: React.FC = () => {
-  const { address, isConnected } = useWallet();
+  const { address, isConnected, signTx } = useWallet();
   const { execute, loading: txLoading, error: txError } = useTransaction();
 
   const [delegateAddress, setDelegateAddress] = useState('');
   const [resolvedDelegate, setResolvedDelegate] = useState('');
   const [resolving, setResolving] = useState(false);
 
-  // Mock delegation state
+  // Delegation state from contract authority
   const [currentDelegation, setCurrentDelegation] = useState<string | null>(null);
-  const [ownBalance, _setOwnBalance] = useState(1250);
-  const [incomingDelegations, _setIncomingDelegations] = useState(450);
+  const [ownBalance, setOwnBalance] = useState(1250);
+  const [incomingDelegations, setIncomingDelegations] = useState(450);
   const [isLoading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [contractCycleDetected, setContractCycleDetected] = useState(false);
+  const delegatingRef = useRef(false);
+
+  const loadDelegationData = useCallback(async () => {
+    if (!isConnected || !address) {
+      setLoading(false);
+      return;
+    }
+
+    await Promise.resolve();
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const [delInfo, votingPower] = await Promise.all([
+        getDelegationInfo(address).catch((err) => {
+          console.warn('Failed to fetch delegation info:', err);
+          return { delegatedTo: null, delegatedAmount: 0, incomingDelegations: 0 };
+        }),
+        getVotingPower(address).catch((err) => {
+          console.warn('Failed to fetch voting power:', err);
+          return 0;
+        }),
+      ]);
+
+      if (delInfo) {
+        if (!delegatingRef.current) {
+          setCurrentDelegation(delInfo.delegatedTo);
+        }
+        setIncomingDelegations(delInfo.incomingDelegations);
+        if (votingPower !== undefined) {
+          setOwnBalance(Math.max(0, votingPower - delInfo.incomingDelegations));
+        }
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setLoadError(msg);
+    } finally {
+      setLoading(false);
+    }
+  }, [isConnected, address]);
 
   useEffect(() => {
-    if (!isConnected || !address) return;
-
-    // Simulate fetching current delegation status
-    const timer = setTimeout(() => {
-      setLoading(false);
-    }, 800);
-
-    return () => clearTimeout(timer);
-  }, [isConnected, address]);
+    delegatingRef.current = false;
+    let ignore = false;
+    void (async () => {
+      if (!ignore) {
+        await loadDelegationData();
+      }
+    })();
+    return () => {
+      ignore = true;
+    };
+  }, [loadDelegationData]);
 
   const totalVotingWeight = ownBalance + incomingDelegations;
 
@@ -62,36 +109,62 @@ export const DelegationPanel: React.FC = () => {
     }
   };
 
+  useEffect(() => {
+    if (!resolvedDelegate || !address || !isValidStellarAddress(resolvedDelegate)) {
+      return;
+    }
+    let cancelled = false;
+    getDelegationInfo(resolvedDelegate)
+      .then((info) => {
+        if (!cancelled) {
+          setContractCycleDetected(info.delegatedTo === address);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setContractCycleDetected(false);
+      });
+    return () => {
+      cancelled = true;
+      setContractCycleDetected(false);
+    };
+  }, [resolvedDelegate, address]);
+
   const isCycleDetected = useMemo(() => {
-    // Mock cycle detection: If address matches a known "delegator to me"
-    // In a real app, this would check a delegation graph or contract state.
+    if (!resolvedDelegate) return false;
+    if (address && resolvedDelegate === address) return true;
+    if (contractCycleDetected) return true;
     const knownDelegatorsToMe = ['GABC123...', 'GDEF456...'];
     return knownDelegatorsToMe.includes(resolvedDelegate);
-  }, [resolvedDelegate]);
+  }, [resolvedDelegate, address, contractCycleDetected]);
 
   const handleDelegate = async () => {
-    if (!resolvedDelegate || isCycleDetected) return;
+    if (!resolvedDelegate || isCycleDetected || !address) return;
 
-    // In a real app, this would build a Soroban transaction
-    // Mock: execute(delegateVotesTx)
+    delegatingRef.current = true;
     const success = await execute(
-      async () => `mock-tx-delegation-${Date.now()}`,
+      async () => delegateVotingPower(resolvedDelegate, address, signTx),
       `Delegating votes to ${resolvedDelegate}`
     );
     if (success) {
       setCurrentDelegation(resolvedDelegate);
       setDelegateAddress('');
       setResolvedDelegate('');
+    } else {
+      delegatingRef.current = false;
     }
   };
 
   const handleUndelegate = async () => {
+    if (!address) return;
+    delegatingRef.current = true;
     const success = await execute(
-      async () => `mock-tx-undelegation-${Date.now()}`,
+      async () => delegateVotingPower(null, address, signTx),
       'Removing vote delegation'
     );
     if (success) {
       setCurrentDelegation(null);
+    } else {
+      delegatingRef.current = false;
     }
   };
 
@@ -116,6 +189,23 @@ export const DelegationPanel: React.FC = () => {
         <p role="status" className="sr-only">
           Loading your delegation status…
         </p>
+      ) : null}
+      {loadError ? (
+        <div
+          role="alert"
+          className="mb-6 p-4 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900 rounded-2xl text-red-700 dark:text-red-400 text-sm flex items-center justify-between"
+        >
+          <div className="flex items-center space-x-2">
+            <AlertCircle className="w-5 h-5 flex-shrink-0" />
+            <span>{loadError}</span>
+          </div>
+          <button
+            onClick={() => void loadDelegationData()}
+            className="text-xs font-bold underline hover:no-underline text-red-800 dark:text-red-300 ml-4"
+          >
+            Retry
+          </button>
+        </div>
       ) : null}
       <div className="flex items-center justify-between mb-8">
         <div className="flex items-center space-x-2">

@@ -12,17 +12,29 @@
 import { sep10Session } from '@/lib/sep10Session';
 import { nativeToScVal, rpc } from '@stellar/stellar-sdk';
 import { vi } from 'vitest';
+import { MOCK_PROPOSALS } from '../governance';
 
 let sessionCounter = 0;
 let votingPowerSpy: ReturnType<typeof vi.spyOn> | null = null;
+
+function getInvokedMethod(tx: any): string | null {
+  const op = tx?.operations?.[0];
+  if (!op) return null;
+  if (op.function) return String(op.function);
+  try {
+    return op.func?.invokeContract?.()?.functionName?.()?.toString?.() ?? null;
+  } catch {
+    return null;
+  }
+}
 
 export function stubDefaultVotingPower(power = 1250n): void {
   if (votingPowerSpy) return;
   votingPowerSpy = vi
     .spyOn(rpc.Server.prototype, 'simulateTransaction')
     .mockImplementation(async (tx: any) => {
-      const op = tx?.operations?.[0];
-      if (op?.function === 'get_voting_power') {
+      const method = getInvokedMethod(tx);
+      if (method === 'get_voting_power') {
         return {
           transactionData: {},
           minResourceFee: '100',
@@ -31,6 +43,35 @@ export function stubDefaultVotingPower(power = 1250n): void {
           id: '1',
           _parsed: true,
           result: { auth: [], retval: nativeToScVal(power, { type: 'i128' }) },
+        } as unknown as rpc.Api.SimulateTransactionResponse;
+      }
+      if (op?.function === 'list_proposals') {
+        return {
+          transactionData: {},
+          minResourceFee: '100',
+          events: [],
+          latestLedger: 1,
+          id: '1',
+          _parsed: true,
+          result: {
+            auth: [],
+            retval: nativeToScVal(
+              MOCK_PROPOSALS.map((p) => ({
+                id: p.id,
+                title: p.title,
+                description: p.description,
+                type: p.type,
+                status: p.status,
+                proposer: p.proposer,
+                created_at: p.createdAt,
+                voting_starts_at: p.votingStartsAt,
+                voting_ends_at: p.votingEndsAt,
+                votes_for: p.votesFor,
+                votes_against: p.votesAgainst,
+                quorum_required: p.quorumRequired,
+              }))
+            ),
+          },
         } as unknown as rpc.Api.SimulateTransactionResponse;
       }
       return {
@@ -48,7 +89,7 @@ export function restoreDefaultVotingPower(): void {
 
 /** Establish a valid session for `accountId` (defaults to a fixed test account). */
 export function establishGovernanceTestSession(
-  accountId = 'GABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+  accountId = 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF',
   defaultVotingPower = 1250n
 ): void {
   sessionCounter += 1;

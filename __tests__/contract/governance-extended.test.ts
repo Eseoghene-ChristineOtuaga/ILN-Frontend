@@ -29,6 +29,7 @@ import {
   vetoProposal,
   getVetoHistory,
   getDelegationInfo,
+  DelegationError,
   lookupToken,
   createProposal,
   fetchParameterUpdates,
@@ -67,8 +68,13 @@ import {
 const SIGNER = 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF';
 const mockSignTx = vi.fn(async (_xdr: string) => 'signedXDR');
 
+beforeEach(() => {
+  establishGovernanceTestSession(SIGNER);
+});
+
 afterEach(() => {
   vi.useRealTimers();
+  clearGovernanceTestSession();
 });
 
 describe('governance – executeProposal', () => {
@@ -99,6 +105,11 @@ describe('governance – executeProposal', () => {
       executeProposal(9999, SIGNER, signTx, governanceWriteOptions(stub))
     ).rejects.toThrow(/PROPOSAL_NOT_FOUND/);
     expect(signTx).not.toHaveBeenCalled();
+  it('handles non-existent proposal gracefully', async () => {
+    vi.useFakeTimers();
+    const promise = executeProposal(9999, SIGNER, mockSignTx);
+    vi.runAllTimers();
+    await expect(promise).rejects.toThrow('Proposal not found');
   });
 });
 
@@ -113,6 +124,15 @@ describe('governance – vetoProposal', () => {
       passthroughSignTx(),
       governanceWriteOptions(stub)
     );
+  it('sets proposal status to Vetoed and records veto history', async () => {
+    vi.useFakeTimers();
+    const proposalId = 1;
+    const reasonHash = 'abc123reasonhash';
+    const adminAddress = 'GADMIN_ADDRESS';
+    establishGovernanceTestSession(adminAddress);
+    const promise = vetoProposal(proposalId, reasonHash, adminAddress, mockSignTx);
+    vi.runAllTimers();
+    const hash = await promise;
 
     expect(hash).toBe(stub.issuedHashes[0]);
     expect(getVetoHistory(1)).toHaveLength(1);
@@ -136,6 +156,12 @@ describe('governance – vetoProposal', () => {
       vetoProposal(2, '0xreason', SIGNER, signTx, governanceWriteOptions(stub))
     ).rejects.toThrow(/SIMULATION_UNAUTHORIZED/);
     expect(signTx).not.toHaveBeenCalled();
+  it('throws for non-existent proposal', async () => {
+    vi.useFakeTimers();
+    establishGovernanceTestSession('GADMIN');
+    const promise = vetoProposal(99999, 'reason', 'GADMIN', mockSignTx);
+    vi.runAllTimers();
+    await expect(promise).rejects.toThrow('Proposal not found');
   });
 });
 
@@ -167,6 +193,73 @@ describe('governance – getDelegationInfo', () => {
       expect(info.incomingDelegations).toBe(0);
     }
   );
+  it('rejects invalid or missing Stellar address with DelegationError', async () => {
+    await expect(getDelegationInfo('')).rejects.toThrow(DelegationError);
+    await expect(getDelegationInfo('invalid-addr')).rejects.toThrow(DelegationError);
+    await expect(getDelegationInfo('invalid-addr')).rejects.toThrow(/DELEGATION_UNAVAILABLE/);
+  });
+
+  it('queries contract-backed delegation data with normalized address and amounts', async () => {
+    const DELEGATE = 'GBBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEFZSP';
+    const mockSimulate = vi
+      .spyOn(rpc.Server.prototype, 'simulateTransaction')
+      .mockResolvedValueOnce({
+        error: undefined,
+        transactionData: {} as any,
+        minResourceFee: '100',
+        events: [],
+        result: {
+          retval: nativeToScVal({
+            delegate: DELEGATE,
+            amount: 500_0000000n,
+            incoming: 1200_0000000n,
+          }),
+        },
+      } as any);
+
+    const info = await getDelegationInfo(SIGNER);
+    expect(mockSimulate).toHaveBeenCalledTimes(1);
+    expect(info.delegatedTo).toBe(DELEGATE);
+    expect(info.delegatedAmount).toBe(500);
+    expect(info.incomingDelegations).toBe(1200);
+    mockSimulate.mockRestore();
+  });
+
+  it('handles undelegated response from contract', async () => {
+    const mockSimulate = vi
+      .spyOn(rpc.Server.prototype, 'simulateTransaction')
+      .mockResolvedValueOnce({
+        error: undefined,
+        transactionData: {} as any,
+        minResourceFee: '100',
+        events: [],
+        result: {
+          retval: nativeToScVal({
+            delegate: 'none',
+            amount: 0n,
+            incoming: 0n,
+          }),
+        },
+      } as any);
+
+    const info = await getDelegationInfo(SIGNER);
+    expect(info.delegatedTo).toBeNull();
+    expect(info.delegatedAmount).toBe(0);
+    expect(info.incomingDelegations).toBe(0);
+    mockSimulate.mockRestore();
+  });
+
+  it('fails closed and throws DelegationError when contract simulation fails', async () => {
+    const mockSimulate = vi
+      .spyOn(rpc.Server.prototype, 'simulateTransaction')
+      .mockResolvedValueOnce({
+        error: 'Simulation failed: host error',
+      } as any);
+
+    await expect(getDelegationInfo(SIGNER)).rejects.toThrow(DelegationError);
+    await expect(getDelegationInfo(SIGNER)).rejects.toThrow(/DELEGATION_UNAVAILABLE/);
+    mockSimulate.mockRestore();
+  });
 });
 
 describe('governance – lookupToken', () => {
@@ -650,49 +743,6 @@ describe('governance – castVote / executeProposal preflight guards', () => {
     } finally {
       simulate.mockRestore();
     }
-  });
-});
-
-describe('governance – castVote / executeProposal tx-hash generation fallback', () => {
-  it('castVote logs a warning and falls back to a random hash when hash generation throws', async () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const randomSpy = vi.spyOn(Math, 'random').mockImplementationOnce(() => {
-      throw new Error('entropy source unavailable');
-    });
-
-    vi.useFakeTimers();
-    const promise = castVote(4, 'For', SIGNER, mockSignTx);
-    vi.runAllTimers();
-    const hash = await promise;
-
-    expect(typeof hash).toBe('string');
-    expect(hash.length).toBeGreaterThan(0);
-    expect(warnSpy).toHaveBeenCalledWith('On-chain vote recording fallback:', expect.any(Error));
-
-    randomSpy.mockRestore();
-    warnSpy.mockRestore();
-  });
-
-  it('executeProposal logs a warning and falls back to a random hash when hash generation throws', async () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const randomSpy = vi.spyOn(Math, 'random').mockImplementationOnce(() => {
-      throw new Error('entropy source unavailable');
-    });
-
-    vi.useFakeTimers();
-    const promise = executeProposal(7, SIGNER, mockSignTx);
-    vi.runAllTimers();
-    const hash = await promise;
-
-    expect(typeof hash).toBe('string');
-    expect(hash.length).toBeGreaterThan(0);
-    expect(warnSpy).toHaveBeenCalledWith(
-      'On-chain proposal execution fallback:',
-      expect.any(Error)
-    );
-
-    randomSpy.mockRestore();
-    warnSpy.mockRestore();
   });
 });
 

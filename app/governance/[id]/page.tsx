@@ -187,6 +187,8 @@ export default function ProposalDetailPage() {
   const params = useParams();
   const router = useRouter();
   const { address, isConnected, connect } = useWallet();
+  const { address, isConnected, connect, signTx, walletNetwork } = useWallet();
+  const { addToast, updateToast } = useToast();
   const { execute, loading: isVoting } = useTransaction();
   const invalidateGovernanceQueries = useInvalidateGovernanceQueries();
 
@@ -194,6 +196,7 @@ export default function ProposalDetailPage() {
 
   const [proposal, setProposal] = useState<Proposal | null>(null);
   const [loading, setLoading] = useState(true);
+  const [proposalError, setProposalError] = useState<string | null>(null);
   const [votingPower, setVotingPower] = useState<number>(0);
   const [votingPowerError, setVotingPowerError] = useState<string | null>(null);
   const [loadingVotingPower, setLoadingVotingPower] = useState(false);
@@ -202,16 +205,24 @@ export default function ProposalDetailPage() {
   const [vetoReason, setVetoReason] = useState('');
   const [vetoReasonHash, setVetoReasonHash] = useState('');
   const [isVetoing, setIsVetoing] = useState(false);
+  const isVetoingRef = useRef(false);
   useDocumentTitle({ pageTitle: proposal?.title ?? `Proposal #${proposalId}` });
 
   const load = useCallback(async () => {
-    const data = await fetchProposal(proposalId);
-    if (!data) {
-      router.replace('/governance');
-      return;
+    try {
+      const data = await fetchProposal(proposalId);
+      if (!data) {
+        router.replace('/governance');
+        return;
+      }
+      setProposal(data);
+      setProposalError(null);
+    } catch (err) {
+      setProposal(null);
+      setProposalError(err instanceof Error ? err.message : 'Governance proposal unavailable');
+    } finally {
+      setLoading(false);
     }
-    setProposal(data);
-    setLoading(false);
   }, [proposalId, router]);
 
   useEffect(() => {
@@ -249,6 +260,7 @@ export default function ProposalDetailPage() {
     const result = await execute(
       async (signTx) =>
         castVote(proposal.id, choice, address, signTx, {
+          walletNetwork,
           onConfirmed: async () => {
             await invalidateGovernanceQueries({
               proposalId: proposal.id,
@@ -284,6 +296,7 @@ export default function ProposalDetailPage() {
     const result = await execute(
       async (signTx) =>
         executeProposal(proposal.id, address, signTx, {
+          walletNetwork,
           onConfirmed: async () => {
             await invalidateGovernanceQueries({
               proposalId: proposal.id,
@@ -311,8 +324,10 @@ export default function ProposalDetailPage() {
   };
 
   const handleVeto = async () => {
+    if (isVetoingRef.current || isVetoing) return;
     if (!proposal || !address || !vetoReasonHash) return;
 
+    isVetoingRef.current = true;
     setIsVetoing(true);
     // Routed through `execute` so the veto gets the same typed governance
     // handling as voting and execution: simulation errors surface before the
@@ -333,6 +348,7 @@ export default function ProposalDetailPage() {
     const toastId = addToast({ type: 'pending', title: 'Vetoing proposal...' });
     try {
       const txHash = await vetoProposal(proposal.id, vetoReasonHash, address, signTx, {
+        walletNetwork,
         onConfirmed: async () => {
           await invalidateGovernanceQueries({
             proposalId: proposal.id,
@@ -365,6 +381,15 @@ export default function ProposalDetailPage() {
       // locally, so the UI cannot show "Vetoed" for a transaction that never
       // settled.
       await load();
+    } catch (err) {
+      updateToast(toastId, {
+        type: 'error',
+        title: 'Veto failed',
+        message: err instanceof Error ? err.message : 'Transaction rejected',
+      });
+    } finally {
+      isVetoingRef.current = false;
+      setIsVetoing(false);
     }
     setIsVetoing(false);
   };
@@ -397,6 +422,29 @@ export default function ProposalDetailPage() {
           <div className="h-10 w-2/3 bg-surface-container rounded-xl" />
           <div className="h-4 w-full bg-surface-container rounded" />
           <div className="h-4 w-3/4 bg-surface-container rounded" />
+        </div>
+      </main>
+    );
+  }
+
+  if (proposalError) {
+    return (
+      <main className="min-h-screen">
+        <Navbar />
+        <div className="pt-28 pb-20 px-8 max-w-7xl mx-auto">
+          <div className="rounded-2xl border border-error/30 bg-error/10 p-8 text-center" role="alert">
+            <span className="material-symbols-outlined text-4xl text-error block mb-2">cloud_off</span>
+            <h2 className="text-xl font-bold text-error">Proposal Unavailable</h2>
+            <p className="mt-2 text-sm text-on-surface-variant">
+              The proposal details could not be retrieved from the governance contract.
+            </p>
+            <button
+              onClick={() => void load()}
+              className="mt-4 inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-primary/90"
+            >
+              Retry
+            </button>
+          </div>
         </div>
       </main>
     );

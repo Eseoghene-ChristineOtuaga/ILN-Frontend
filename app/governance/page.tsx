@@ -202,14 +202,22 @@ export default function GovernancePage() {
 
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<ProposalFilter>('Active');
   const [page, setPage] = useState(1);
   const [votingPower, setVotingPower] = useState(0);
 
   const load = useCallback(async () => {
-    const data = await fetchProposals();
-    setProposals(data);
-    setLoading(false);
+    try {
+      const data = await fetchProposals();
+      setProposals(data);
+      setError(null);
+    } catch (err) {
+      setProposals([]);
+      setError(err instanceof Error ? err.message : 'Governance proposals unavailable');
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -307,7 +315,23 @@ export default function GovernancePage() {
           </div>
 
           <ErrorBoundary onRetry={() => void load()}>
-            {loading ? (
+            {error ? (
+              <div className="rounded-2xl border border-error/30 bg-error/10 p-8 text-center" role="alert">
+                <span className="material-symbols-outlined text-4xl text-error block mb-2">cloud_off</span>
+                <h3 className="text-lg font-bold text-error">Governance Data Unavailable</h3>
+                <p className="mt-1 text-sm text-on-surface-variant">
+                  {error.includes('GOVERNANCE_READ_UNAVAILABLE')
+                    ? 'Proposals could not be loaded from the governance contract. Please try again later.'
+                    : error}
+                </p>
+                <button
+                  onClick={() => void load()}
+                  className="mt-4 inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-primary/90"
+                >
+                  Retry
+                </button>
+              </div>
+            ) : loading ? (
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
                 {Array.from({ length: 6 }).map((_, i) => (
                   <div key={i} className="h-64 rounded-2xl bg-surface-container animate-pulse" />
